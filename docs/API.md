@@ -86,9 +86,22 @@
 > **注意**：`<img>` 标签无法发送 `Authorization` 头，因此该端点同时接受
 > `?token=<jwt>` 查询参数。前端 `pageImageUrl()` 已自动附加。
 
+### POST /papers/{paper_id}/reanalyze
+
+用当前 OCR 引擎重新切题，返回更新后的 paper。
+
+区域在**上传时**就已写入数据库，换了识别引擎后旧试卷会保留旧框。该端点用已保存的页面
+图片重新计算全部区域：
+
+- 删除该试卷所有旧区域及关联的用户勾选（区域 id 会重新生成）
+- 按新结果重建 `question_regions`
+- 回写 `page.width/height/ocr_text` 与 `paper.ocr_provider`
+
+`200` → paper；`409` 页面图片不可用（存储丢失）。
+
 ### GET /papers/{paper_id}/workspace
 
-工作台数据源：
+工作台数据源（`regions[].x/y/width/height` 是**原图像素坐标**，前端据此在原图上叠加可点选方框）：
 
 ```json
 {
