@@ -42,6 +42,8 @@ export interface Paper {
   id: number
   title: string
   subject: string
+  /** 'auto' when inferred from OCR text, 'user' when explicitly chosen */
+  subject_source?: string
   status: string
   error_message: string
   page_count: number

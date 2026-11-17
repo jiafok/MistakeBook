@@ -57,6 +57,8 @@ class Paper(Base, TimestampMixin):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="未命名试卷")
     subject: Mapped[str] = mapped_column(String(64), nullable=False, default="未分类")
+    # "auto" when inferred from recognised text, "user" when picked explicitly.
+    subject_source: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
     error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

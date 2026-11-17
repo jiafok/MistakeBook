@@ -86,6 +86,8 @@ class PaperOut(BaseModel):
     id: int
     title: str
     subject: str
+    # "auto" = inferred from OCR text, "user" = explicitly chosen
+    subject_source: str = "user"
     status: str
     error_message: str
     page_count: int

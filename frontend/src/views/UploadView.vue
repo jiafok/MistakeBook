@@ -17,7 +17,9 @@ const router = useRouter()
 const route = useRoute()
 const message = useMessage()
 
-const subject = ref('数学')
+// 'auto' asks the server to infer the subject from the recognised text.
+const AUTO_SUBJECT = 'auto'
+const subject = ref(AUTO_SUBJECT)
 const title = ref('')
 const files = ref<File[]>([])
 const uploading = ref(false)
@@ -25,9 +27,15 @@ const progress = ref(0)
 const cameraInput = ref<HTMLInputElement | null>(null)
 const galleryInput = ref<HTMLInputElement | null>(null)
 
-const subjectOptions = ['数学', '语文', '英语', '物理', '化学', '生物', '历史', '地理', '政治'].map(
-  (value) => ({ label: value, value }),
-)
+const subjectOptions = [
+  { label: '自动识别（推荐）', value: AUTO_SUBJECT },
+  ...['数学', '语文', '英语', '物理', '化学', '生物', '历史', '地理', '政治'].map((value) => ({
+    label: value,
+    value,
+  })),
+]
+
+const isAutoSubject = computed(() => subject.value === AUTO_SUBJECT)
 
 const isTouchDevice = ref(false)
 
@@ -222,6 +230,10 @@ onMounted(() => {
           <div class="field field-narrow">
             <label class="field-label">学科</label>
             <NSelect v-model:value="subject" :options="subjectOptions" />
+            <p v-if="isAutoSubject" class="field-hint">
+              上传后根据识别到的文字自动判断学科，你也可以随时改。
+            </p>
+            <p v-else class="field-hint">已手动指定，识别完成后不会被覆盖。</p>
           </div>
         </div>
 
@@ -384,6 +396,13 @@ onMounted(() => {
 .field-narrow {
   flex: 0 0 160px;
   min-width: 140px;
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--mb-muted);
 }
 
 .field-label {

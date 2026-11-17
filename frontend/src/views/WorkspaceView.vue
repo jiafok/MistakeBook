@@ -35,6 +35,12 @@ const recorded = ref<Record<number, boolean>>({})
 
 const currentPage = ref(1)
 const zoom = ref(1)
+/**
+ * In fit mode the scale follows the available width; manual zoom disables it.
+ * Starting at 1 rendered the image at natural pixel size, which overflowed every
+ * phone screen and hid most of the page.
+ */
+const fitMode = ref(true)
 const canvasEl = ref<HTMLElement | null>(null)
 const imageEl = ref<HTMLImageElement | null>(null)
 const imageLoaded = ref(false)
@@ -70,6 +76,40 @@ const displayed = computed(() => {
   if (!info) return { width: 0, height: 0 }
   return { width: info.width * zoom.value, height: info.height * zoom.value }
 })
+
+/** Horizontal padding of `.canvas-viewport`, mirrored from the stylesheet. */
+function viewportPadding(): number {
+  if (typeof window === 'undefined') return 32
+  return window.matchMedia("(max-width: 640px)").matches ? 20 : 40
+}
+
+/** Scale that makes the page exactly as wide as the scroll container. */
+function fitScaleFor(): number {
+  const info = currentPageInfo.value
+  const container = canvasEl.value
+  if (!info || !container) return 1
+  const available = container.clientWidth - viewportPadding()
+  if (available <= 0 || info.width <= 0) return 1
+  // Never upscale beyond 1: a small scan would otherwise blur.
+  return Math.min(1, available / info.width)
+}
+
+/** Apply fit only while the user has not taken manual control of the zoom. */
+function applyFit(): void {
+  if (!fitMode.value) return
+  zoom.value = Number(fitScaleFor().toFixed(4))
+}
+
+function fitToWidth(): void {
+  fitMode.value = true
+  applyFit()
+}
+
+function setZoom(next: number): void {
+  // Any explicit zoom is a manual decision: stop overriding it on resize.
+  fitMode.value = false
+  zoom.value = Math.min(4, Math.max(0.25, Number(next.toFixed(2))))
+}
 
 const basketSelected = computed(() =>
   (workspace.value?.regions ?? []).filter((region) => selected.value[region.id] && !recorded.value[region.id]),
@@ -274,6 +314,12 @@ function changePage(delta: number) {
 function onImageLoad() {
   imageLoaded.value = true
   imageError.value = false
+  // The container has its final size only once content is rendered.
+  nextTick(() => applyFit())
+}
+
+function onResize(): void {
+  applyFit()
 }
 
 function onImageError() {
@@ -288,28 +334,35 @@ function onKeydown(event: KeyboardEvent) {
   }
   if ((event.ctrlKey || event.metaKey) && (event.key === '+' || event.key === '=')) {
     event.preventDefault()
-    zoom.value = Math.min(4, Number((zoom.value + 0.25).toFixed(2)))
+    setZoom(zoom.value + 0.25)
   }
   if ((event.ctrlKey || event.metaKey) && event.key === '-') {
     event.preventDefault()
-    zoom.value = Math.max(0.25, Number((zoom.value - 0.25).toFixed(2)))
+    setZoom(zoom.value - 0.25)
   }
 }
 
 watch(currentPage, () => {
   imageLoaded.value = false
   imageError.value = false
-  nextTick(() => canvasEl.value?.querySelector<HTMLElement>('.canvas-viewport')?.scrollTo({ top: 0, left: 0 }))
+  nextTick(() => {
+    canvasEl.value?.querySelector<HTMLElement>('.canvas-viewport')?.scrollTo({ top: 0, left: 0 })
+    applyFit()
+  })
 })
 
 onMounted(() => {
   load()
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('resize', onResize)
+  window.addEventListener('orientationchange', onResize)
 })
 
 onBeforeUnmount(() => {
   window.clearTimeout(saveTimer)
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', onResize)
+  window.removeEventListener('orientationchange', onResize)
 })
 </script>
 
@@ -333,6 +386,14 @@ onBeforeUnmount(() => {
             <div class="ws-paper-title">{{ workspace.paper.title }}</div>
             <div class="ws-paper-sub">
               <NTag size="small" :bordered="false">{{ workspace.paper.subject }}</NTag>
+              <NTag
+                v-if="workspace.paper.subject_source === 'auto'"
+                size="small"
+                :bordered="false"
+                type="info"
+              >
+                自动识别
+              </NTag>
               <span>共 {{ workspace.paper.page_count }} 页 · {{ counts.total }} 个题目区域</span>
             </div>
           </div>
@@ -347,9 +408,11 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="ws-zoom">
-          <NButton size="small" @click="zoom = Math.max(0.25, Number((zoom - 0.25).toFixed(2)))">−</NButton>
-          <NButton size="small" @click="zoom = 1">适应宽度</NButton>
-          <NButton size="small" @click="zoom = Math.min(4, Number((zoom + 0.25).toFixed(2)))">＋</NButton>
+          <NButton size="small" @click="setZoom(zoom - 0.25)">−</NButton>
+          <NButton size="small" :type="fitMode ? 'primary' : 'default'" @click="fitToWidth">
+            适应宽度
+          </NButton>
+          <NButton size="small" @click="setZoom(zoom + 0.25)">＋</NButton>
           <span class="ws-zoom-value">{{ Math.round(zoom * 100) }}%</span>
         </div>
       </header>
@@ -607,12 +670,18 @@ onBeforeUnmount(() => {
 
 .canvas-scroll {
   flex: 1;
+  /* Only scroll when the user actually zoomed past the container width. */
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  min-width: 0;
 }
 
 .canvas-viewport {
-  display: grid;
-  place-items: start center;
+  /* Flex (not grid) centring: the viewport stays at container width, so an image
+     that fits does not create a horizontal scrollbar. */
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
   padding: 20px;
   min-height: 100%;
 }
@@ -623,6 +692,8 @@ onBeforeUnmount(() => {
 }
 
 .canvas-stage {
+  /* flex: never shrink below the scaled page size, so zoom stays predictable */
+  flex: 0 0 auto;
   position: relative;
   box-shadow: 0 2px 18px rgba(15, 23, 42, 0.12);
   background: #fff;

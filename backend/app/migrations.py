@@ -150,8 +150,33 @@ def migrate_users(engine: Engine) -> None:
         logger.info("users table migration complete (%d rows)", len(rows))
 
 
+def migrate_papers(engine: Engine) -> None:
+    """Add papers.subject_source to databases created before it existed.
+
+    SQLite supports ADD COLUMN with a constant default, so no table rebuild is
+    needed here. Guarded by a column check so it can run on every startup.
+    """
+    if engine.dialect.name != "sqlite":
+        logger.info("skipping papers migration (dialect=%s)", engine.dialect.name)
+        return
+
+    with engine.begin() as conn:
+        if not _table_exists(conn, "papers"):
+            return
+        if "subject_source" in _columns(conn, "papers"):
+            return
+        conn.execute(
+            text(
+                "ALTER TABLE papers "
+                "ADD COLUMN subject_source VARCHAR(16) NOT NULL DEFAULT 'user'"
+            )
+        )
+        logger.info("added papers.subject_source")
+
+
 def run_migrations(engine: Engine) -> None:
-    try:
-        migrate_users(engine)
-    except Exception as exc:  # noqa: BLE001 - never block startup on migration issues
-        logger.exception("migration failed: %s", exc)
+    for step in (migrate_users, migrate_papers):
+        try:
+            step(engine)
+        except Exception as exc:  # noqa: BLE001 - never block startup on migration issues
+            logger.exception("migration %s failed: %s", step.__name__, exc)

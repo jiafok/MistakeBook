@@ -86,6 +86,26 @@
 > **注意**：`<img>` 标签无法发送 `Authorization` 头，因此该端点同时接受
 > `?token=<jwt>` 查询参数。前端 `pageImageUrl()` 已自动附加。
 
+### POST /papers/{paper_id}/reanalyze?detect_subject=true
+
+重新切题；`detect_subject=true` 时同时按识别文字重新判断学科。
+`subject_source` 会标为 `auto`。不带该参数时，用户手动指定的学科不会被覆盖。
+
+## 自动判断学科
+
+上传时 `subject` 参数视为**提示**：
+
+| 传入值 | 行为 |
+| --- | --- |
+| 省略 / `auto` / `未分类` | 服务端根据识别到的文字判断学科，`subject_source=auto` |
+| 任何具体学科（如 `化学`） | 尊重用户选择，`subject_source=user`，识别结果不会覆盖 |
+
+判断逻辑是离线关键词打分（`backend/app/services/subject.py`）：每个学科有强/弱关键词，
+按识别全文加权计分，**只有明显领先且证据充分时才给出结论**，否则返回空并保留用户选择。
+覆盖 9 个学科：数学 / 语文 / 英语 / 物理 / 化学 / 生物 / 历史 / 地理 / 政治。
+
+`PaperOut.subject_source` 取值：`auto`（自动识别）或 `user`（手动指定）。
+
 ### POST /papers/{paper_id}/reanalyze
 
 用当前 OCR 引擎重新切题，返回更新后的 paper。

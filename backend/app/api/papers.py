@@ -38,6 +38,7 @@ from ..schemas import (
 )
 from ..services.dedup import content_hash
 from ..services.ocr import get_region_engine
+from ..services.subject import detect_subject as infer_subject
 from ..storage import StorageError, get_storage
 
 router = APIRouter(prefix="/papers", tags=["papers"])
@@ -124,10 +125,15 @@ async def upload_paper(
         )
 
     storage = get_storage()
+    # The client may send "auto"/empty/未分类 to ask the server to infer the
+    # subject from the recognised text. Anything else is an explicit decision.
+    requested_subject = (subject or "").strip()
+    subject_is_auto = requested_subject in ("", "auto", "未分类")
     paper = Paper(
         user_id=user.id,
         title=(title.strip() or "未命名试卷")[:255],
-        subject=(subject.strip() or "未分类")[:64],
+        subject=("未分类" if subject_is_auto else requested_subject)[:64],
+        subject_source=("auto" if subject_is_auto else "user"),
         status="processing",
         ocr_provider=settings.ocr_provider,
         source_names=",".join((f.filename or "") for f in files)[:2000],
@@ -221,6 +227,16 @@ async def upload_paper(
                 )
 
     paper.page_count = page_no
+
+    # Infer the subject from what was actually recognised, but never override an
+    # explicit choice made by the user.
+    if subject_is_auto and page_no > 0:
+        collected = "\n".join((p.ocr_text or "") for p in paper.pages)
+        detected = infer_subject(collected)
+        if detected:
+            paper.subject = detected[:64]
+            paper.subject_source = "auto"
+
     if page_no == 0:
         paper.status = "failed"
         paper.error_message = "; ".join(failures)[:2000] or "没有可处理的页面"
@@ -273,7 +289,10 @@ def delete_paper(
 
 @router.post("/{paper_id}/reanalyze", response_model=PaperOut)
 def reanalyze_paper(
-    paper_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    paper_id: int,
+    redetect_subject: bool = Query(default=False, alias="detect_subject"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> PaperOut:
     """Re-run region detection on an already-uploaded paper.
 
@@ -348,6 +367,15 @@ def reanalyze_paper(
         page.width = analysis.width
         page.height = analysis.height
         page.ocr_text = analysis.text
+
+    # Refresh an auto-detected subject, or any subject when the caller explicitly
+    # asks for re-detection. A plain reanalyze never overrides a user's choice.
+    if paper.subject_source == "auto" or redetect_subject:
+        detected = infer_subject("\n".join((p.ocr_text or "") for p in paper.pages))
+        if detected:
+            paper.subject = detected[:64]
+            if redetect_subject:
+                paper.subject_source = "auto"
 
     paper.ocr_provider = settings.ocr_provider
     paper.status = "ready"
