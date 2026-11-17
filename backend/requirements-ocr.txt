@@ -1,0 +1,19 @@
+# Optional OCR alternatives. The default RapidOCR provider is included in
+# requirements.txt and runs on CPU. Install these only to use other engines.
+#
+#   pip install -r backend/requirements-ocr.txt
+#
+# Set OCR_PROVIDER=tesseract (or paddle) in the environment.
+#
+# Notes
+# -----
+# * paddleocr may improve some Chinese + printed-math scans but is a large
+#   download (hundreds of MB) and needs a matching paddlepaddle build.
+# * tesseract is lighter: install the desktop/engine package separately and
+#   keep the `chi_sim` + `eng` language data available.
+
+pytesseract==0.3.13
+
+# PaddleOCR (uncomment to enable; pick the paddlepaddle build for your platform)
+# paddleocr==2.9.1
+# paddlepaddle==2.6.2

@@ -1,0 +1,153 @@
+:root {
+  --mb-bg: #f5f7fb;
+  --mb-panel: #ffffff;
+  --mb-border: #e3e8f0;
+  --mb-text: #1f2937;
+  --mb-muted: #6b7280;
+  --mb-brand: #2563eb;
+  --mb-brand-soft: #eff4ff;
+
+  --mb-normal: #9aa3af;
+  --mb-suspect: #f0b429;
+  --mb-recommend: #1f9d55;
+  --mb-recorded: #d6f5e3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--mb-bg);
+  color: var(--mb-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mb-page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+}
+
+.mb-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.mb-page-title {
+  font-size: 22px;
+  font-weight: 650;
+  margin: 0;
+}
+
+.mb-page-subtitle {
+  color: var(--mb-muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.mb-empty {
+  padding: 56px 24px;
+  text-align: center;
+  color: var(--mb-muted);
+}
+
+.mb-text-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------------------------------------------------------------------------
+   Mobile / tablet baseline.
+   The app is expected to be used on phones, so the shared shell is tuned for
+   touch first: safe-area aware padding, 16px inputs (prevents iOS zoom-on-focus)
+   and no accidental horizontal scrolling.
+--------------------------------------------------------------------------- */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  overscroll-behavior-y: none;
+}
+
+/* iOS Safari zooms the page when a < 16px input receives focus. */
+@media (max-width: 640px) {
+  input,
+  textarea,
+  select,
+  .n-input__input-el,
+  .n-input__textarea-el {
+    font-size: 16px !important;
+  }
+
+  .mb-page {
+    padding: 14px 14px 40px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+    padding-bottom: max(40px, calc(env(safe-area-inset-bottom) + 24px));
+  }
+
+  .mb-page-header {
+    gap: 10px;
+  }
+
+  .mb-page-title {
+    font-size: 19px;
+  }
+
+  .mb-page-subtitle {
+    font-size: 12px;
+  }
+
+  /* Touch targets: 40px minimum, recommended 44px. */
+  .n-button {
+    min-height: 40px;
+  }
+
+  .n-button--tiny-type,
+  .n-button--small-type {
+    min-height: 32px;
+  }
+
+  /* Wide tables scroll inside their card instead of pushing the layout. */
+  .n-data-table {
+    font-size: 13px;
+  }
+}
+
+/* Never allow a full-page horizontal scrollbar on small screens. */
+@media (max-width: 980px) {
+  body {
+    overflow-x: hidden;
+  }
+}
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
