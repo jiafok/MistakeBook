@@ -24,6 +24,16 @@ QUESTION_LABEL_RE = re.compile(
     r"^\s*(?:第\s*)?(\d{1,3})\s*[\.、\)．]|^\s*[（(](\d{1,3})[）)]|^\s*([一二三四五六七八九十]+)\s*[、\.]"
 )
 
+# Only these start a new question region. Sub-items such as "(1)" stay inside the
+# parent question, because a worksheet's main numbering is what a mistake book
+# cares about.
+# A question starts with "1." / "第1题". A bare number on its own line is NOT a
+# start: on a real worksheet those are page numbers ("13") or table fragments.
+QUESTION_START_RE = re.compile(
+    r"^\s*(?:第\s*)?(\d{1,3})\s*[.、．]"
+    r"|^\s*第\s*(\d{1,3})\s*题"
+)
+
 
 @dataclass
 class RegionBox:
@@ -357,14 +367,53 @@ def _mark_shape(mask: Image.Image, box: tuple[int, int, int, int]) -> tuple[str,
     return "unknown", 0.0
 
 
+def _ink_threshold(gray: Image.Image) -> int:
+    """Otsu's method: split paper from ink without assuming a white background.
+
+    A phone photo of a worksheet is often grey and unevenly lit, so the old fixed
+    threshold of 180 marked almost every pixel as ink.
+    """
+    histogram = gray.histogram()[:256]
+    total = sum(histogram)
+    if total == 0:
+        return 180
+
+    sum_all = sum(i * count for i, count in enumerate(histogram))
+    sum_back = 0.0
+    weight_back = 0
+    best_variance = -1.0
+    best_threshold = 180
+
+    for threshold in range(256):
+        weight_back += histogram[threshold]
+        if weight_back == 0:
+            continue
+        weight_fore = total - weight_back
+        if weight_fore == 0:
+            break
+
+        sum_back += threshold * histogram[threshold]
+        mean_back = sum_back / weight_back
+        mean_fore = (sum_all - sum_back) / weight_fore
+        variance = weight_back * weight_fore * (mean_back - mean_fore) ** 2
+        if variance > best_variance:
+            best_variance = variance
+            best_threshold = threshold
+
+    # Clamp: never so low that paper texture becomes ink, never so high that
+    # light pencil disappears.
+    return max(90, min(190, best_threshold))
+
+
 def _segment_rows(gray: Image.Image) -> list[tuple[int, int]]:
     """Row-projection segmentation of text blocks (not individual lines)."""
     width, height = gray.size
     if height == 0 or width == 0:
         return []
 
-    # binary ink mask: white paper -> 0, ink -> 255
-    binary = gray.point(lambda p: 255 if p < 180 else 0)
+    # binary ink mask: paper -> 0, ink -> 255
+    threshold = _ink_threshold(gray)
+    binary = gray.point(lambda p: 255 if p < threshold else 0)
     rows = list(binary.resize((1, height), Image.Resampling.BOX).getdata())
     ink = [v / 255.0 for v in rows]
 
@@ -505,6 +554,180 @@ def _split_bands_by_labels(
     return out
 
 
+def _split_x_from_lines(lines: list[OcrLine], width: int) -> int | None:
+    """Detect a two-column gutter from where question numbers start.
+
+    Question numbers anchor each column because they sit at the column margin.
+    Raw min/max is not usable (a stray page number near the edge would skew it),
+    so anchors are grouped into clusters and the widest gap between neighbouring
+    clusters is taken as the gutter.
+    """
+    anchors = sorted(
+        line.x0 for line in lines if QUESTION_START_RE.match(line.text.strip())
+    )
+    if len(anchors) < 4:
+        return None
+
+    # Group anchors that are within 6% of the page width of each other.
+    tolerance = max(12, int(width * 0.06))
+    clusters: list[list[int]] = [[anchors[0]]]
+    for value in anchors[1:]:
+        if value - clusters[-1][-1] <= tolerance:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+
+    centres = [sum(cluster) / len(cluster) for cluster in clusters]
+    if len(centres) < 2:
+        return None
+
+    # Take the widest gap between adjacent cluster centres.
+    best_gap = 0.0
+    best_mid: float | None = None
+    for previous, current in zip(centres, centres[1:]):
+        gap = current - previous
+        if gap > best_gap:
+            best_gap = gap
+            best_mid = (previous + current) / 2
+
+    # A genuine two-column gutter spans a large fraction of the page.
+    if best_mid is None or best_gap < width * 0.22:
+        return None
+
+    # Both sides must hold several questions, otherwise it is single-column.
+    left = sum(1 for value in anchors if value < best_mid)
+    right = len(anchors) - left
+    if left < 2 or right < 2:
+        return None
+
+    # Put the boundary in the white gutter, not at the geometric midpoint: the
+    # right column's margin is the first x that belongs to it. Shift a little
+    # left of that so indented left-column options are not captured.
+    right_margin = min(value for value in anchors if value >= best_mid)
+    boundary = right_margin - max(8, int(width * 0.02))
+    return int(max(1, boundary))
+
+
+def _union_box(lines: list[OcrLine], width: int, height: int) -> tuple[int, int, int, int]:
+    x0 = max(0, min(line.x0 for line in lines))
+    y0 = max(0, min(line.y0 for line in lines))
+    x1 = min(width, max(line.x1 for line in lines))
+    y1 = min(height, max(line.y1 for line in lines))
+    return x0, y0, x1, y1
+
+
+def _group_question_segments(lines: list[OcrLine]) -> list[list[OcrLine]]:
+    """Split one column's OCR lines into per-question groups.
+
+    Lines before the first question number are the column header (title, name,
+    score box) and are dropped: they are not questions and should not become a
+    selectable box. If the column has no numbering at all it is a single group.
+    """
+    if not lines:
+        return []
+
+    ordered = sorted(lines, key=lambda line: (line.y0, line.x0))
+    starts = [
+        index
+        for index, line in enumerate(ordered)
+        if QUESTION_START_RE.match(line.text.strip())
+    ]
+    if not starts:
+        # No numbering: we cannot tell where one question ends and the next
+        # begins, and one page-sized box would be useless to select. Signal the
+        # caller to use the projection fallback instead.
+        return []
+
+    groups: list[list[OcrLine]] = []
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(ordered)
+        group = ordered[start:end]
+        if group:
+            groups.append(group)
+    return groups
+
+
+def _regions_from_ocr_lines(
+    ocr_lines: list[OcrLine],
+    width: int,
+    height: int,
+    split_x: int | None,
+) -> list[RegionBox]:
+    """Turn OCR lines into one tightly bounded box per question."""
+    if not ocr_lines:
+        return []
+
+    # Partition lines into page columns so left/right questions never merge.
+    if split_x is not None:
+        # A line belongs to the column its left edge starts in: column margins are
+        # what define the reading order, and centred comparison misassigns
+        # question numbers that sit close to the gutter.
+        left = [line for line in ocr_lines if line.x0 < split_x]
+        right = [line for line in ocr_lines if line.x0 >= split_x]
+        columns = [column for column in (left, right) if column]
+    else:
+        columns = [ocr_lines]
+
+    pad_y = max(4, int(height * 0.004))
+    regions: list[RegionBox] = []
+
+    for column in columns:
+        for group in _group_question_segments(column):
+            x0, y0, x1, y1 = _union_box(group, width, height)
+            y0 = max(0, y0 - pad_y)
+            y1 = min(height, y1 + pad_y)
+
+            combined = "\n".join(line.text for line in group)
+            match = QUESTION_START_RE.match(group[0].text.strip())
+            label = ""
+            if match:
+                token = next((value for value in match.groups() if value), "")
+                if token:
+                    label = f"第 {token} 题" if token.isdigit() else f"{token}、"
+
+            regions.append(
+                RegionBox(
+                    x=int(x0),
+                    y=int(y0),
+                    width=int(max(1, x1 - x0)),
+                    height=int(max(1, y1 - y0)),
+                    region_order=len(regions),
+                    label=label or f"第 {len(regions) + 1} 题",
+                    text=combined,
+                )
+            )
+    return regions
+
+
+def _score_box(box: RegionBox, red_mask: Image.Image) -> int:
+    """Fill wrong_probability/band on a box using red-pen and text evidence."""
+    region = (box.x, box.y, box.x + box.width, box.y + box.height)
+    coverage, peak = _red_signal(red_mask, region)
+    text_delta, evidence = _text_signal(box.text)
+
+    red_component = 0.0
+    if peak > 0.25:
+        red_component = _clamp((peak - 0.25) / 0.45 * 70.0, 0.0, 70.0)
+    if coverage > 0.02:
+        red_component = _clamp(max(red_component, coverage / 0.10 * 38.0), 0.0, 70.0)
+
+    shape, shape_conf = _mark_shape(red_mask, region)
+    shape_delta = 0.0
+    if shape == "cross" and shape_conf >= 0.55:
+        shape_delta = 24.0
+        red_component = max(red_component, 58.0)
+    elif shape == "check" and shape_conf >= 0.60:
+        shape_delta = -70.0
+        red_component = 0.0
+
+    probability = int(round(_clamp(10.0 + red_component + shape_delta + text_delta)))
+    box.wrong_probability = probability
+    box.band = band_for(probability)
+    if evidence:
+        box.text = f"{box.text} [{evidence}]" if box.text else f"[{evidence}]"
+    return probability
+
+
 class RegionEngine:
     """Detects question regions and estimates wrong probability."""
 
@@ -521,45 +744,44 @@ class RegionEngine:
             "text_extraction": self.provider.available and self.provider.name != "heuristic",
         }
 
-    def analyze(self, image_bytes: bytes, *, _allow_column_split: bool = True) -> PageAnalysis:
+    def analyze(self, image_bytes: bytes) -> PageAnalysis:
         image = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes)))
         image.load()
         rgb = image.convert("RGB")
         gray = rgb.convert("L")
         width, height = rgb.size
 
-        if _allow_column_split:
-            split_x = _find_column_split(gray)
-            if split_x is not None:
-                analyses: list[tuple[int, PageAnalysis]] = []
-                for left, right, offset in ((0, split_x, 0), (split_x, width, split_x)):
-                    column = rgb.crop((left, 0, right, height))
-                    buffer = io.BytesIO()
-                    column.save(buffer, format="PNG")
-                    analyses.append(
-                        (offset, self.analyze(buffer.getvalue(), _allow_column_split=False))
-                    )
+        warnings: list[str] = []
 
-                regions: list[RegionBox] = []
-                warnings: list[str] = []
-                text_parts: list[str] = []
-                for offset, analysis in analyses:
-                    if analysis.text:
-                        text_parts.append(analysis.text)
-                    warnings.extend(analysis.warnings)
-                    for region in analysis.regions:
-                        region.x += offset
-                        region.region_order = len(regions)
-                        regions.append(region)
+        # ------------------------------------------------------------------
+        # Preferred path: one tight box per question, built from OCR geometry.
+        #
+        # A photographed worksheet has an uneven grey background, so pixel row
+        # projection reports ink on every row, collapses the page into a single
+        # band, and then chops it into overlapping fragments. OCR already knows
+        # where each text line is, which is exactly what the selection UI needs.
+        # ------------------------------------------------------------------
+        ocr_lines = (
+            self.provider.extract_lines(rgb) if isinstance(self.provider, RapidOcr) else []
+        )
+        if ocr_lines:
+            ocr_regions = _regions_from_ocr_lines(
+                ocr_lines, width, height, _split_x_from_lines(ocr_lines, width)
+            )
+            if ocr_regions:
+                red_mask_ocr = _red_mask(rgb)
+                for box in ocr_regions:
+                    _score_box(box, red_mask_ocr)
+                    box.detection_status = "ocr"
                 return PageAnalysis(
                     width=width,
                     height=height,
-                    text="\n\n".join(text_parts),
-                    regions=regions,
+                    text="\n".join(line.text for line in ocr_lines),
+                    regions=ocr_regions,
                     warnings=warnings,
                 )
+            warnings.append("已识别文字，但未找到题目编号，改用版面切分")
 
-        warnings: list[str] = []
         bands = _segment_rows(gray)
         if not bands:
             warnings.append("未检测到题目区域：页面可能是空白或对比度过低")
@@ -613,7 +835,6 @@ class RegionEngine:
             expanded.extend(_split_tall(top, bottom, max_height))
         expanded = _merge_close_bands(expanded, max_gap=int(height * 0.008))
 
-        ocr_lines = self.provider.extract_lines(rgb) if isinstance(self.provider, RapidOcr) else []
         expanded = _split_bands_by_labels(expanded, ocr_lines, height)
         full_text = (
             "\n".join(line.text for line in ocr_lines)

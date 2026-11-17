@@ -156,6 +156,11 @@ export const api = {
     await http.delete(`/papers/${id}`)
   },
 
+  async reanalyzePaper(id: number): Promise<Paper> {
+    const { data } = await http.post<Paper>(`/papers/${id}/reanalyze`)
+    return data
+  },
+
   async workspace(paperId: number): Promise<Workspace> {
     const { data } = await http.get<Workspace>(`/papers/${paperId}/workspace`)
     return data

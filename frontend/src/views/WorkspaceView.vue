@@ -24,6 +24,7 @@ const message = useMessage()
 const paperId = computed(() => Number(route.params.id))
 const loading = ref(true)
 const submitting = ref(false)
+const redetecting = ref(false)
 const workspace = ref<Workspace | null>(null)
 const loadError = ref('')
 
@@ -220,6 +221,21 @@ function scrollToRegion(region: Region) {
   }, 1200)
 }
 
+async function redetect() {
+  redetecting.value = true
+  try {
+    await api.reanalyzePaper(paperId.value)
+    // Region ids are regenerated, so drop the undo history and reload.
+    undoStack.value = []
+    await load()
+    message.success('已重新识别题目区域')
+  } catch (error) {
+    message.error(apiErrorMessage(error))
+  } finally {
+    redetecting.value = false
+  }
+}
+
 async function submit() {
   const ids = basketSelected.value.map((region) => region.id)
   if (ids.length === 0) {
@@ -354,6 +370,14 @@ onBeforeUnmount(() => {
                 <NButton size="small" quaternary @click="undo">撤销 (Ctrl+Z)</NButton>
               </template>
               撤销上一次切换或批量操作
+            </NTooltip>
+            <NTooltip>
+              <template #trigger>
+                <NButton size="small" quaternary :loading="redetecting" @click="redetect">
+                  重新识别
+                </NButton>
+              </template>
+              区域位置不准时，用当前引擎重新切题（会清空已选）
             </NTooltip>
           </div>
 

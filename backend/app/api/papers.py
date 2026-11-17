@@ -271,6 +271,92 @@ def delete_paper(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/{paper_id}/reanalyze", response_model=PaperOut)
+def reanalyze_paper(
+    paper_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> PaperOut:
+    """Re-run region detection on an already-uploaded paper.
+
+    Regions are computed once at upload time. When the detection engine improves,
+    older papers would otherwise keep stale boxes, so this re-derives them from
+    the stored page images. User selections are cleared because region ids change.
+    """
+    paper = get_owned_paper(paper_id, db, user)
+    storage = get_storage()
+    engine = get_region_engine()
+
+    cleared = 0
+    for page in sorted(paper.pages, key=lambda item: item.page_no):
+        try:
+            data = storage.read(page.storage_key)
+        except StorageError as exc:
+            raise HTTPException(status_code=409, detail=f"第 {page.page_no} 页图片不可用") from exc
+
+        analysis = engine.analyze(data)
+
+        # Drop the old geometry and any selections tied to it.
+        old_regions = db.scalars(
+            select(QuestionRegion).where(QuestionRegion.page_id == page.id)
+        ).all()
+        for region in old_regions:
+            db.execute(
+                RegionSelection.__table__.delete().where(
+                    RegionSelection.region_id == region.id
+                )
+            )
+            db.delete(region)
+            cleared += 1
+        db.flush()
+
+        section = db.scalar(
+            select(Section).where(Section.paper_id == paper.id, Section.order_index == page.page_no - 1)
+        )
+        if section is None:
+            section = Section(paper_id=paper.id, title=f"第 {page.page_no} 页", order_index=page.page_no - 1)
+            db.add(section)
+            db.flush()
+
+        for box in analysis.regions:
+            question = Question(
+                paper_id=paper.id,
+                section_id=section.id,
+                label=box.label,
+                text=box.text,
+                subject=paper.subject,
+                order_index=box.region_order,
+                content_hash=content_hash(box.text or box.label),
+            )
+            db.add(question)
+            db.flush()
+            db.add(
+                QuestionRegion(
+                    paper_id=paper.id,
+                    page_id=page.id,
+                    page_no=page.page_no,
+                    question_id=question.id,
+                    x=box.x,
+                    y=box.y,
+                    width=box.width,
+                    height=box.height,
+                    region_order=box.region_order,
+                    wrong_probability=box.wrong_probability,
+                    band=box.band,
+                    detection_status=box.detection_status,
+                )
+            )
+
+        page.width = analysis.width
+        page.height = analysis.height
+        page.ocr_text = analysis.text
+
+    paper.ocr_provider = settings.ocr_provider
+    paper.status = "ready"
+    paper.error_message = ""
+    db.commit()
+    db.refresh(paper)
+    return PaperOut.model_validate(paper)
+
+
 @router.get("/{paper_id}/pages/{page_no}/image")
 def get_page_image(
     paper_id: int,

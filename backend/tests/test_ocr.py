@@ -1,4 +1,9 @@
-"""Focused regression checks for OCR orientation and two-column pages."""
+"""Regression checks for OCR orientation, column assignment and question boxes.
+
+The important behaviour is geometric: each numbered question must become exactly
+one box that hugs its own text, with left/right columns never merged. This is what
+the on-image selection UI depends on.
+"""
 
 import io
 import sys
@@ -12,18 +17,18 @@ from app.api.papers import _extract_pages
 from app.services.ocr import (
     NullOcr,
     OcrLine,
-    RapidOcr,
+    QUESTION_START_RE,
     RegionEngine,
-    _find_column_split,
-    _split_bands_by_labels,
+    _group_question_segments,
+    _ink_threshold,
+    _regions_from_ocr_lines,
+    _split_x_from_lines,
     _text_signal,
 )
 
 
-def _image_bytes(image: Image.Image, fmt: str = "PNG", **save_kwargs: object) -> bytes:
-    buffer = io.BytesIO()
-    image.save(buffer, format=fmt, **save_kwargs)
-    return buffer.getvalue()
+def _line(x0: int, y0: int, x1: int, y1: int, text: str) -> OcrLine:
+    return OcrLine(x0, y0, x1, y1, text, 0.95)
 
 
 def test_exif_orientation_is_applied_before_storage() -> None:
@@ -35,68 +40,86 @@ def test_exif_orientation_is_applied_before_storage() -> None:
     assert normalized.size == (80, 40), normalized.size
 
 
-def test_two_columns_are_segmented_independently() -> None:
-    image = Image.new("RGB", (1200, 1000), "white")
-    draw = ImageDraw.Draw(image)
-    for y in range(60, 900, 45):
-        draw.text((80, y), "Left column question and answer", fill="black")
-        draw.text((680, y), "Right column question and answer", fill="black")
-
-    split = _find_column_split(image.convert("L"))
-    assert split is not None, "expected the central gutter to be detected"
-
-    engine = RegionEngine()
-    engine.provider = NullOcr()
-    analysis = engine.analyze(_image_bytes(image))
-    assert analysis.width == 1200 and analysis.height == 1000
-    assert len(analysis.regions) >= 2, len(analysis.regions)
-    assert any(region.x < split for region in analysis.regions)
-    assert any(region.x >= split for region in analysis.regions)
-    assert all(region.x + region.width <= analysis.width for region in analysis.regions)
+def _image_bytes(image: Image.Image, fmt: str = "PNG", **save_kwargs: object) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format=fmt, **save_kwargs)
+    return buffer.getvalue()
 
 
-def test_band_is_split_at_question_numbers() -> None:
-    # One tall band that actually contains three numbered questions.
-    band = [(100, 700)]
+def test_question_number_regex_only_matches_real_starts() -> None:
+    assert QUESTION_START_RE.match("1.构成氯化钠的微观粒子是")
+    assert QUESTION_START_RE.match("12、某物质")
+    assert QUESTION_START_RE.match("第 4 题 计算")
+    # Must not treat these as question starts.
+    assert not QUESTION_START_RE.match("(1) 12 x8 = 96")
+    assert not QUESTION_START_RE.match("13")
+    assert not QUESTION_START_RE.match("一、选择题")
+    assert not QUESTION_START_RE.match("A.原子")
+
+
+def test_one_box_per_question_in_a_single_column() -> None:
     lines = [
-        OcrLine(80, 110, 400, 140, "1. 第一题", 0.95),
-        OcrLine(80, 300, 400, 330, "2. 第二题", 0.95),
-        OcrLine(80, 500, 400, 530, "3. 第三题", 0.95),
+        _line(80, 100, 400, 130, "姓名：某某"),          # header, must be dropped
+        _line(80, 200, 500, 230, "1.第一题题干"),
+        _line(90, 240, 500, 270, "A.选项甲"),
+        _line(80, 300, 500, 330, "2.第二题题干"),
+        _line(90, 340, 500, 370, "A.选项乙"),
+        _line(80, 400, 500, 430, "3.第三题题干"),
     ]
-    parts = _split_bands_by_labels(band, lines, 1000)
-    assert len(parts) == 3, parts
-    assert parts[0][0] == 100 and parts[-1][1] == 700
-    assert all(end > start for start, end in parts)
+    regions = _regions_from_ocr_lines(lines, 1000, 1200, split_x=None)
 
-    # A single question must not be split, and non-question text must not split.
-    single = _split_bands_by_labels(band, [OcrLine(80, 110, 400, 140, "1. 只有一题", 0.9)], 1000)
-    assert single == band, single
-
-    prose = _split_bands_by_labels(
-        band,
-        [
-            OcrLine(80, 110, 400, 140, "化学试题", 0.9),
-            OcrLine(80, 300, 400, 330, "注意事项", 0.9),
-        ],
-        1000,
-    )
-    assert prose == band, prose
+    assert len(regions) == 3, [r.text for r in regions]
+    assert regions[0].text.startswith("1.")
+    assert regions[1].text.startswith("2.")
+    assert regions[2].text.startswith("3.")
+    # The header line must not become a selectable box.
+    assert all("姓名" not in r.text for r in regions)
+    # Boxes must hug their own text, not the whole page width.
+    for region in regions:
+        assert region.width < 1000, region.width
 
 
-def test_rapidocr_result_boxes_are_parsed() -> None:
-    provider = RapidOcr.__new__(RapidOcr)
-    provider.available = True
-    provider.reason = "ok"
-    provider._engine = lambda _image: (
-        [([[10, 20], [90, 20], [90, 45], [10, 45]], "化学试题", 0.97)],
-        [1.0, 0.1, 0.2],
-    )
+def test_two_columns_are_never_merged() -> None:
+    lines = [
+        _line(80, 200, 480, 230, "1.左栏第一题"),
+        _line(80, 260, 480, 290, "2.左栏第二题"),
+        _line(80, 320, 480, 350, "3.左栏第三题"),
+        _line(540, 200, 940, 230, "4.右栏第一题"),
+        _line(540, 260, 940, 290, "5.右栏第二题"),
+        _line(540, 320, 940, 350, "6.右栏第三题"),
+    ]
+    split_x = _split_x_from_lines(lines, 1000)
+    assert split_x is not None, "expected a two-column gutter"
 
-    lines = provider.extract_lines(Image.new("RGB", (100, 100), "white"))
-    assert len(lines) == 1
-    assert (lines[0].x0, lines[0].y0, lines[0].x1, lines[0].y1) == (10, 20, 90, 45)
-    assert lines[0].text == "化学试题"
-    assert lines[0].confidence == 0.97
+    regions = _regions_from_ocr_lines(lines, 1000, 1200, split_x)
+    assert len(regions) == 6, [r.text for r in regions]
+
+    left = [r for r in regions if r.x + r.width / 2 < split_x]
+    right = [r for r in regions if r.x + r.width / 2 >= split_x]
+    assert len(left) == 3 and len(right) == 3
+    # No box may straddle the gutter.
+    assert all(r.x + r.width <= split_x + 5 for r in left)
+    assert all(r.x >= split_x - 5 for r in right)
+
+
+def test_single_column_page_has_no_gutter() -> None:
+    lines = [
+        _line(80, 200 + index * 60, 800, 230 + index * 60, f"{index + 1}.题目内容")
+        for index in range(6)
+    ]
+    assert _split_x_from_lines(lines, 1000) is None
+
+
+def test_otsu_threshold_handles_grey_photo() -> None:
+    # A photographed page: grey paper with dark text, not white paper.
+    image = Image.new("L", (200, 200), 165)
+    draw = ImageDraw.Draw(image)
+    for y in range(20, 180, 20):
+        draw.rectangle([20, y, 180, y + 6], fill=40)
+
+    threshold = _ink_threshold(image)
+    # Must sit between the ink and the paper, so the page is not "all ink".
+    assert 40 < threshold < 165, threshold
 
 
 def test_algebra_variable_x_is_not_a_wrong_mark() -> None:
@@ -105,15 +128,33 @@ def test_algebra_variable_x_is_not_a_wrong_mark() -> None:
     assert _text_signal("teacher mark: X")[0] > 0
 
 
+def test_header_lines_are_not_questions() -> None:
+    lines = [
+        _line(80, 10, 400, 40, "物质构成的奥秘"),
+        _line(80, 50, 400, 80, "一、选择题"),
+        _line(80, 200, 500, 230, "1.真正的第一题"),
+        _line(80, 260, 500, 290, "2.真正的第二题"),
+    ]
+    groups = _group_question_segments(lines)
+    assert len(groups) == 2, [g[0].text for g in groups]
+    assert groups[0][0].text.startswith("1.")
+
+
 if __name__ == "__main__":
     test_exif_orientation_is_applied_before_storage()
     print("ok  EXIF orientation applied")
-    test_two_columns_are_segmented_independently()
-    print("ok  two-column segmentation")
-    test_band_is_split_at_question_numbers()
-    print("ok  bands split at question numbers")
-    test_rapidocr_result_boxes_are_parsed()
-    print("ok  RapidOCR detection boxes parsed")
+    test_question_number_regex_only_matches_real_starts()
+    print("ok  question-number regex is strict")
+    test_one_box_per_question_in_a_single_column()
+    print("ok  one box per question")
+    test_two_columns_are_never_merged()
+    print("ok  two columns stay separate")
+    test_single_column_page_has_no_gutter()
+    print("ok  single column has no gutter")
+    test_otsu_threshold_handles_grey_photo()
+    print("ok  otsu threshold handles grey photos")
     test_algebra_variable_x_is_not_a_wrong_mark()
     print("ok  algebraic x is not a grading mark")
+    test_header_lines_are_not_questions()
+    print("ok  header lines excluded")
     print("ALL OCR CHECKS PASSED")
