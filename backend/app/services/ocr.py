@@ -470,6 +470,41 @@ def _split_tall(top: int, bottom: int, max_height: int) -> list[tuple[int, int]]
     return out
 
 
+def _split_bands_by_labels(
+    bands: list[tuple[int, int]],
+    ocr_lines: list[OcrLine],
+    height: int,
+) -> list[tuple[int, int]]:
+    """Split a row band at numbered question starts found inside it.
+
+    Row projection merges consecutive questions whenever the gap between them is
+    as small as the gap between two lines of a single question, which is exactly
+    how Chinese worksheets are laid out. The OCR text is therefore used to find
+    real question boundaries such as "3." or "第 4 题".
+    """
+    starts = sorted(
+        {line.y0 for line in ocr_lines if QUESTION_LABEL_RE.match(line.text.strip())}
+    )
+    if len(starts) < 2:
+        return bands
+
+    min_part = max(10, int(height * 0.012))
+    out: list[tuple[int, int]] = []
+    for top, bottom in bands:
+        # A label at the very start of the band already is the first question;
+        # splitting there would produce an empty part.
+        guard = top + (bottom - top) * 0.08
+        inner = [y for y in starts if guard < y < bottom]
+        if not inner:
+            out.append((top, bottom))
+            continue
+        points = [top, *inner, bottom]
+        for start, end in zip(points, points[1:]):
+            if end - start >= min_part:
+                out.append((start, end))
+    return out
+
+
 class RegionEngine:
     """Detects question regions and estimates wrong probability."""
 
@@ -577,7 +612,9 @@ class RegionEngine:
         for top, bottom in bands:
             expanded.extend(_split_tall(top, bottom, max_height))
         expanded = _merge_close_bands(expanded, max_gap=int(height * 0.008))
+
         ocr_lines = self.provider.extract_lines(rgb) if isinstance(self.provider, RapidOcr) else []
+        expanded = _split_bands_by_labels(expanded, ocr_lines, height)
         full_text = (
             "\n".join(line.text for line in ocr_lines)
             if ocr_lines

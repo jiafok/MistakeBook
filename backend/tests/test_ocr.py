@@ -9,7 +9,15 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api.papers import _extract_pages
-from app.services.ocr import NullOcr, RapidOcr, RegionEngine, _find_column_split, _text_signal
+from app.services.ocr import (
+    NullOcr,
+    OcrLine,
+    RapidOcr,
+    RegionEngine,
+    _find_column_split,
+    _split_bands_by_labels,
+    _text_signal,
+)
 
 
 def _image_bytes(image: Image.Image, fmt: str = "PNG", **save_kwargs: object) -> bytes:
@@ -47,6 +55,34 @@ def test_two_columns_are_segmented_independently() -> None:
     assert all(region.x + region.width <= analysis.width for region in analysis.regions)
 
 
+def test_band_is_split_at_question_numbers() -> None:
+    # One tall band that actually contains three numbered questions.
+    band = [(100, 700)]
+    lines = [
+        OcrLine(80, 110, 400, 140, "1. 第一题", 0.95),
+        OcrLine(80, 300, 400, 330, "2. 第二题", 0.95),
+        OcrLine(80, 500, 400, 530, "3. 第三题", 0.95),
+    ]
+    parts = _split_bands_by_labels(band, lines, 1000)
+    assert len(parts) == 3, parts
+    assert parts[0][0] == 100 and parts[-1][1] == 700
+    assert all(end > start for start, end in parts)
+
+    # A single question must not be split, and non-question text must not split.
+    single = _split_bands_by_labels(band, [OcrLine(80, 110, 400, 140, "1. 只有一题", 0.9)], 1000)
+    assert single == band, single
+
+    prose = _split_bands_by_labels(
+        band,
+        [
+            OcrLine(80, 110, 400, 140, "化学试题", 0.9),
+            OcrLine(80, 300, 400, 330, "注意事项", 0.9),
+        ],
+        1000,
+    )
+    assert prose == band, prose
+
+
 def test_rapidocr_result_boxes_are_parsed() -> None:
     provider = RapidOcr.__new__(RapidOcr)
     provider.available = True
@@ -74,6 +110,8 @@ if __name__ == "__main__":
     print("ok  EXIF orientation applied")
     test_two_columns_are_segmented_independently()
     print("ok  two-column segmentation")
+    test_band_is_split_at_question_numbers()
+    print("ok  bands split at question numbers")
     test_rapidocr_result_boxes_are_parsed()
     print("ok  RapidOCR detection boxes parsed")
     test_algebra_variable_x_is_not_a_wrong_mark()
