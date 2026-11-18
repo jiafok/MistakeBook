@@ -171,6 +171,7 @@ class MistakeOut(BaseModel):
     wrong_probability: int | None
     status: str
     paper_title: str
+    image_url: str = ""
     created_at: datetime
 
 

@@ -184,6 +184,14 @@ export const api = {
     return `/api/v1/papers/${paperId}/pages/${pageNo}/image${suffix}`
   },
 
+  mistakeImageUrl(imageUrl: string): string {
+    // <img> cannot send an Authorization header, so pass the token as a query param.
+    if (!imageUrl) return ''
+    const token = localStorage.getItem(TOKEN_KEY)
+    const suffix = token ? `?token=${encodeURIComponent(token)}` : ''
+    return `${imageUrl}${suffix}`
+  },
+
   async listMistakes(params: Record<string, string | number | undefined>): Promise<MistakePage> {
     const { data } = await http.get<MistakePage>('/mistakes', { params })
     return data

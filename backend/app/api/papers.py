@@ -36,6 +36,7 @@ from ..schemas import (
     SelectionPatch,
     WorkspaceOut,
 )
+from ..services.crop import crop_key, crop_region
 from ..services.dedup import content_hash
 from ..services.ocr import get_region_engine
 from ..services.subject import detect_subject as infer_subject
@@ -601,11 +602,30 @@ def commit_selection(
             )
             continue
 
+        # Cut the question's own pixels out of the page so the mistake shows the
+        # printed question exactly. Text reconstruction can never be identical:
+        # figure labels are missed, fraction bars and chemical symbols are lost.
+        image_key = ""
+        try:
+            crop = crop_region(
+                get_storage().read(page.storage_key),
+                region,
+                page.width,
+                page.height,
+            )
+            image_key = crop_key(user.id, question.id)
+            get_storage().save(image_key, crop)
+        except (StorageError, ValueError, OSError):
+            # A missing crop must not block recording the mistake; the text is
+            # still stored and the UI falls back to it.
+            image_key = ""
+
         mistake = Mistake(
             user_id=user.id,
             question_id=question.id,
             paper_id=paper.id,
             region_id=region.id,
+            question_image_key=image_key,
             selection_source=(
                 "ai_preselected_accepted"
                 if region.band == "recommended"

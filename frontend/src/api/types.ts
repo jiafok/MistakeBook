@@ -125,6 +125,8 @@ export interface Mistake {
   wrong_probability: number | null
   status: string
   paper_title: string
+  /** Cropped original pixels of this question; empty when no crop was saved. */
+  image_url: string
   created_at: string
 }
 

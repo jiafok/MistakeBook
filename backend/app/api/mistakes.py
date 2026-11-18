@@ -22,6 +22,7 @@ from ..models import (
 from ..schemas import MistakeOut, MistakePageOut, MistakeUpdate
 from ..services.dedup import content_hash
 from ..services.review import create_plan
+from ..storage import StorageError, get_storage
 
 router = APIRouter(prefix="/mistakes", tags=["mistakes"])
 
@@ -71,6 +72,11 @@ def _to_out(db: Session, mistake: Mistake) -> MistakeOut:
         wrong_probability=mistake.wrong_probability_snapshot,
         status=mistake.status,
         paper_title=paper.title if paper else "",
+        # Full path, not router.prefix: the router is mounted under settings.api_prefix
+        # and <img> cannot resolve a bare "/mistakes/..." path.
+        image_url=(
+            f"/api/v1/mistakes/{mistake.id}/image" if mistake.question_image_key else ""
+        ),
         created_at=mistake.created_at,
     )
 
@@ -246,3 +252,30 @@ def ensure_review_plan(
         create_plan(db, mistake)
         db.commit()
     return {"ok": True}
+
+
+@router.get("/{mistake_id}/image")
+def get_mistake_image(
+    mistake_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Serve the original pixels of this question, cut from the paper image.
+
+    The mistake book must show the question exactly as printed, so the crop is the
+    authoritative view and the OCR text is only a searchable alongside.
+    """
+    mistake = db.get(Mistake, mistake_id)
+    if mistake is None or mistake.user_id != user.id:
+        raise HTTPException(status_code=404, detail="错题不存在")
+    if not mistake.question_image_key:
+        raise HTTPException(status_code=404, detail="该错题没有原图")
+    try:
+        data = get_storage().read(mistake.question_image_key)
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail="原图不可用") from exc
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )

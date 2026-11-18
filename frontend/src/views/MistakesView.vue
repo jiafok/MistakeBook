@@ -191,7 +191,11 @@ onMounted(async () => {
             <NTag size="small" :bordered="false">{{ item.subject }}</NTag>
           </div>
 
-          <div class="card-text mb-text-clamp">{{ item.text || '（无识别文本）' }}</div>
+          <!-- The crop is the printed question, so the card previews the real thing. -->
+          <div v-if="item.image_url" class="card-thumb">
+            <img :src="api.mistakeImageUrl(item.image_url)" :alt="item.label || '原题'" loading="lazy" />
+          </div>
+          <div v-else class="card-text mb-text-clamp">{{ item.text || '（无识别文本）' }}</div>
 
           <div class="card-meta">
             <NTag v-if="item.error_reason" size="small" :type="reasonColor(item.error_reason)" :bordered="false">
@@ -233,6 +237,22 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 14px;
+}
+
+.card-thumb {
+  margin: 8px 0 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.card-thumb img {
+  display: block;
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  object-position: top center;
 }
 
 .mistake-card {

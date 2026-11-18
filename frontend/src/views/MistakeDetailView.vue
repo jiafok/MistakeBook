@@ -2,8 +2,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  NAlert,
   NButton,
   NCard,
+  NCollapse,
+  NCollapseItem,
   NDescriptions,
   NDescriptionsItem,
   NDivider,
@@ -24,10 +27,14 @@ const router = useRouter()
 const message = useMessage()
 
 const id = computed(() => Number(route.params.id))
+
+// The cropped original page pixels for this question, if a crop was saved.
+const questionImage = computed(() => api.mistakeImageUrl(mistake.value?.image_url ?? ''))
 const mistake = ref<Mistake | null>(null)
 const loading = ref(true)
 const analyzing = ref(false)
 const editing = ref(false)
+const previewOpen = ref(false)
 
 const editSubject = ref('')
 const editDifficulty = ref(3)
@@ -155,13 +162,34 @@ onMounted(load)
       <NEmpty v-if="!loading && !mistake" description="题目不存在" />
 
       <template v-else-if="mistake">
-        <NCard :bordered="false" class="detail-card" title="题目内容">
-          <div class="question-text">{{ mistake.text || '（无识别文本）' }}</div>
+        <NCard :bordered="false" class="detail-card image-card" title="原题（与试卷完全一致）">
+          <!-- The crop is the printed question itself, so nothing can drift from
+               the paper: figures, table rules, fractions and symbols are intact. -->
+          <div v-if="questionImage" class="question-image-wrap">
+            <img
+              class="question-image"
+              :src="questionImage"
+              :alt="mistake.label || '原题'"
+              @click="previewOpen = true"
+            />
+            <div class="image-hint">点击可放大查看</div>
+          </div>
+          <NAlert v-else type="warning" :bordered="false" title="这条错题没有原图">
+            该错题是在生成原图功能之前记录的。到对应试卷的「框选题目」页重新提交一次，
+            就会自动保存原题截图。
+          </NAlert>
+
           <template v-if="mistake.answer_text">
             <NDivider style="margin: 14px 0" />
             <div class="answer-label">学生答案</div>
             <div class="answer-text">{{ mistake.answer_text }}</div>
           </template>
+
+          <NCollapse style="margin-top: 14px">
+            <NCollapseItem title="识别文字（用于搜索与导出，可能与原题有差异）" name="ocr">
+              <div class="question-text">{{ mistake.text || '（无识别文本）' }}</div>
+            </NCollapseItem>
+          </NCollapse>
         </NCard>
 
         <NCard :bordered="false" class="detail-card" title="基础信息">
@@ -274,6 +302,12 @@ onMounted(load)
         </NCard>
       </template>
     </NSpin>
+
+    <!-- Full-screen view so small print and figure labels stay readable on a phone. -->
+    <div v-if="previewOpen && questionImage" class="image-preview" @click="previewOpen = false">
+      <img :src="questionImage" :alt="mistake?.label || '原题'" />
+      <div class="preview-hint">点击任意处关闭</div>
+    </div>
   </div>
 </template>
 
@@ -282,6 +316,60 @@ onMounted(load)
   border-radius: 14px;
   margin-bottom: 16px;
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.05);
+}
+
+.image-card :deep(.n-card-content) {
+  /* The crop is the whole point of this card, so give it the width back. */
+  padding: 8px;
+}
+
+.question-image-wrap {
+  text-align: center;
+}
+
+.question-image {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.image-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.88);
+  cursor: zoom-out;
+  overflow: auto;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: calc(100vh - 80px);
+  object-fit: contain;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.preview-hint {
+  font-size: 12px;
+  color: #cbd5e1;
 }
 
 .question-text {
