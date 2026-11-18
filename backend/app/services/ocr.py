@@ -16,6 +16,7 @@ from typing import Protocol
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
 from ..config import settings
+from .textlayout import build_question_text, cluster_rows
 
 SUSPECT_SYMBOLS = ("△", "?", "？", "○")
 CORRECT_SYMBOLS = ("√", "✓", "✔")
@@ -626,11 +627,14 @@ def _group_question_segments(lines: list[OcrLine]) -> list[list[OcrLine]]:
     if not lines:
         return []
 
-    ordered = sorted(lines, key=lambda line: (line.y0, line.x0))
+    # Work in visual rows: a question number is often detected on its own with a
+    # slightly lower y than the text beside it, and ordering raw boxes by (y0, x0)
+    # would move that text into the previous question.
+    ordered = cluster_rows(lines)
     starts = [
         index
-        for index, line in enumerate(ordered)
-        if QUESTION_START_RE.match(line.text.strip())
+        for index, row in enumerate(ordered)
+        if any(QUESTION_START_RE.match(box.text.strip()) for box in row.lines)
     ]
     if not starts:
         # No numbering: we cannot tell where one question ends and the next
@@ -641,7 +645,9 @@ def _group_question_segments(lines: list[OcrLine]) -> list[list[OcrLine]]:
     groups: list[list[OcrLine]] = []
     for position, start in enumerate(starts):
         end = starts[position + 1] if position + 1 < len(starts) else len(ordered)
-        group = ordered[start:end]
+        group: list[OcrLine] = []
+        for row in ordered[start:end]:
+            group.extend(row.lines)
         if group:
             groups.append(group)
     return groups
@@ -677,8 +683,15 @@ def _regions_from_ocr_lines(
             y0 = max(0, y0 - pad_y)
             y1 = min(height, y1 + pad_y)
 
-            combined = "\n".join(line.text for line in group)
-            match = QUESTION_START_RE.match(group[0].text.strip())
+            combined = build_question_text(group, QUESTION_START_RE)
+            first_text = min(
+                (line for line in group if line.text.strip()),
+                key=lambda line: (line.y0, line.x0),
+                default=None,
+            )
+            match = (
+                QUESTION_START_RE.match(first_text.text.strip()) if first_text else None
+            )
             label = ""
             if match:
                 token = next((value for value in match.groups() if value), "")
