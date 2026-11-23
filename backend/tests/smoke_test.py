@@ -168,6 +168,48 @@ def main() -> int:
         if body["total"] != 2:
             failures.append(f"expected 2 mistakes, got {body['total']}")
 
+        # A mistake recorded before figure extraction existed carries no pictures.
+        # Re-committing the question must backfill them, or the printed record
+        # silently keeps missing its diagram forever.
+        from app import models
+        from app.db import SessionLocal
+        from app.services.figures import dump_figure_set
+
+        with SessionLocal() as db:
+            region = db.get(models.QuestionRegion, ids[0])
+            box = {
+                "x": region.x + 10,
+                "y": region.y + 10,
+                "width": max(20, region.width // 3),
+                "height": max(20, region.height // 3),
+            }
+            region.figures_json = dump_figure_set([box])
+            question_id = region.question_id
+            legacy = db.query(models.Mistake).filter_by(question_id=question_id).one()
+            legacy.figures_json = "[]"
+            db.commit()
+
+        r = client.post(
+            f"/api/v1/papers/{paper['id']}/commit", headers=headers, json={"region_ids": [ids[0]]}
+        )
+        backfilled = r.json()["existing"]
+        with SessionLocal() as db:
+            stored = db.query(models.Mistake).filter_by(question_id=question_id).one().figures_json
+        print("backfill:", backfilled, stored[:70])
+        if backfilled != 1 or stored in ("", "[]"):
+            failures.append("re-commit did not backfill figures onto a legacy mistake")
+
+        # An existing picture set must be left alone: re-committing is idempotent
+        # and must never multiply pictures or drop the already-stored ones.
+        r = client.post(
+            f"/api/v1/papers/{paper['id']}/commit", headers=headers, json={"region_ids": [ids[0]]}
+        )
+        with SessionLocal() as db:
+            again = db.query(models.Mistake).filter_by(question_id=question_id).one().figures_json
+        print("second re-commit keeps set:", again == stored)
+        if again != stored:
+            failures.append("re-commit changed an already-populated picture set")
+
         # AI analysis (offline fallback)
         r = client.post(
             "/api/v1/ai/analyze",

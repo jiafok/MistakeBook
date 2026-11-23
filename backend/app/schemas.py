@@ -121,6 +121,9 @@ class RegionOut(BaseModel):
     detection_status: str
     is_selected: bool
     is_recorded: bool
+    # How many pictures were lifted out of this question. The selection UI only
+    # needs the count to tell the user "this question carries a figure".
+    figure_count: int = 0
 
 
 class WorkspaceOut(BaseModel):
@@ -153,9 +156,22 @@ class CommitOut(BaseModel):
     items: list[CommitItemResult]
 
 
+class MistakeFigureOut(BaseModel):
+    """One printed picture (apparatus, circuit, curve) lifted out of the paper."""
+
+    index: int
+    url: str
+    width: int
+    height: int
+
+
 class MistakeOut(BaseModel):
     id: int
     question_id: int
+    paper_id: int | None = None
+    # Null when the mistake was recorded against a region that a re-analysis had
+    # to discard (an old engine's whole-column box). The record itself is kept.
+    region_id: int | None = None
     label: str
     text: str
     answer_text: str
@@ -172,6 +188,9 @@ class MistakeOut(BaseModel):
     status: str
     paper_title: str
     image_url: str = ""
+    # Printed figures lifted out of the paper page and re-attached to the text.
+    # The question itself is always text; only the drawings travel as pictures.
+    figures: list["MistakeFigureOut"] = Field(default_factory=list)
     created_at: datetime
 
 

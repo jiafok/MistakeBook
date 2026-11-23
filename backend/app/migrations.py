@@ -174,8 +174,33 @@ def migrate_papers(engine: Engine) -> None:
         logger.info("added papers.subject_source")
 
 
+def migrate_figures(engine: Engine) -> None:
+    """Add figures_json to mistakes / question_regions.
+
+    Older databases only stored a single full-question screenshot, so the figure
+    list starts empty; questions re-committed afterwards fill it in.
+    """
+    if engine.dialect.name != "sqlite":
+        logger.info("skipping figures migration (dialect=%s)", engine.dialect.name)
+        return
+
+    with engine.begin() as conn:
+        for table in ("mistakes", "question_regions"):
+            if not _table_exists(conn, table):
+                continue
+            if "figures_json" in _columns(conn, table):
+                continue
+            conn.execute(
+                text(
+                    f"ALTER TABLE {table} "
+                    "ADD COLUMN figures_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            )
+            logger.info("added %s.figures_json", table)
+
+
 def run_migrations(engine: Engine) -> None:
-    for step in (migrate_users, migrate_papers):
+    for step in (migrate_users, migrate_papers, migrate_figures):
         try:
             step(engine)
         except Exception as exc:  # noqa: BLE001 - never block startup on migration issues

@@ -11,7 +11,16 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import get_current_user
 from ..models import AiAnalysis, Mistake, Paper, Question, User
-from ..services.export import ExportItem, safe_filename, to_docx, to_markdown, to_pdf
+from ..services.export import (
+    ExportFigure,
+    ExportItem,
+    safe_filename,
+    to_docx,
+    to_markdown,
+    to_pdf,
+)
+from ..services.figures import load_figure_set
+from ..storage import StorageError, get_storage
 
 router = APIRouter(prefix="/export", tags=["export"])
 
@@ -21,6 +30,34 @@ MEDIA = {
     "markdown": "text/markdown; charset=utf-8",
     "obsidian": "text/markdown; charset=utf-8",
 }
+
+
+def _load_figures(mistake: Mistake) -> list[ExportFigure]:
+    """Read the stored figure crops so they can be embedded in the export."""
+    figures: list[ExportFigure] = []
+    storage = get_storage()
+    for item in load_figure_set(mistake.figures_json) or []:
+        key = str(item.get("key") or "")
+        if not key:
+            continue
+        try:
+            data = storage.read(key)
+        except StorageError:
+            # A missing picture must not break the whole export; the text is the
+            # authoritative question and still prints correctly.
+            continue
+        labels = item.get("labels")
+        figures.append(
+            ExportFigure(
+                data=data,
+                width=int(item.get("width", 0) or 0),
+                height=int(item.get("height", 0) or 0),
+                labels=[entry for entry in labels if isinstance(entry, dict)]
+                if isinstance(labels, list)
+                else [],
+            )
+        )
+    return figures
 
 
 def _collect(db: Session, user: User, paper_id: int | None, subject: str | None) -> list[ExportItem]:
@@ -72,6 +109,7 @@ def _collect(db: Session, user: User, paper_id: int | None, subject: str | None)
                 wrong_count=mistake.wrong_count,
                 paper_title=paper.title if paper else "",
                 created_at=mistake.created_at,
+                figures=_load_figures(mistake),
             )
         )
     return items

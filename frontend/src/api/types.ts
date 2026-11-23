@@ -77,6 +77,8 @@ export interface Region {
   detection_status: string
   is_selected: boolean
   is_recorded: boolean
+  /** How many drawings this question carries; the question itself is text. */
+  figure_count: number
 }
 
 export interface WorkspaceCounts {
@@ -107,9 +109,33 @@ export interface CommitResult {
   items: CommitItemResult[]
 }
 
+export interface MistakeFigure {
+  /** Stable position of this drawing inside the question. */
+  index: number
+  /** Absolute API path; pass through `api.authImageUrl` before using it in <img>. */
+  url: string
+  /** Stored pixel size, used to reserve space and avoid layout jumps. */
+  width: number
+  height: number
+}
+
+/** Result of re-locating the drawings of a paper analysed by an older build. */
+export interface FigureRepairResult {
+  /** Regions whose figure list was recomputed. */
+  regions: number
+  /** Drawings found across those regions. */
+  figures: number
+  /** Recorded mistakes that gained pictures (and lost their screenshot). */
+  mistakes: number
+}
+
 export interface Mistake {
   id: number
   question_id: number
+  /** Source paper, used to offer a figure repair on legacy records. */
+  paper_id: number | null
+  /** Region on the page. Null when an old whole-column box was discarded. */
+  region_id: number | null
   label: string
   text: string
   answer_text: string
@@ -125,8 +151,10 @@ export interface Mistake {
   wrong_probability: number | null
   status: string
   paper_title: string
-  /** Cropped original pixels of this question; empty when no crop was saved. */
+  /** Legacy whole-question screenshot; empty for mistakes recorded as text. */
   image_url: string
+  /** Drawings lifted out of the paper, printed after the question text. */
+  figures: MistakeFigure[]
   created_at: string
 }
 

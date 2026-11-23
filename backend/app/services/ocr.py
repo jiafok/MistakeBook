@@ -57,6 +57,9 @@ class PageAnalysis:
     text: str = ""
     regions: list[RegionBox] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Recognised text lines in page coordinates. Callers use them to tell printed
+    # text apart from drawings when they lift the figures out of a question.
+    lines: list["OcrLine"] = field(default_factory=list)
 
 
 @dataclass
@@ -678,6 +681,7 @@ def _regions_from_ocr_lines(
     regions: list[RegionBox] = []
 
     for column in columns:
+        column_start = len(regions)
         for group in _group_question_segments(column):
             x0, y0, x1, y1 = _union_box(group, width, height)
             y0 = max(0, y0 - pad_y)
@@ -709,7 +713,32 @@ def _regions_from_ocr_lines(
                     text=combined,
                 )
             )
+        _separate_column(regions, column_start)
     return regions
+
+
+def _separate_column(regions: list[RegionBox], start: int) -> None:
+    """Cut overlapping question boxes in one column apart at their midpoint.
+
+    OCR boxes are taller than the printed glyphs, and a little padding is added on
+    each side, so two consecutive questions end up overlapping. In the workspace the
+    overlap is where the user *cannot* click reliably: the box drawn on top wins, so
+    tapping a boundary picks the neighbouring question. Splitting the overlap at the
+    midpoint removes that dead/ambiguous band without dropping any recognised line
+    from its own box (each keeps the half that touches its text).
+    """
+    column = regions[start:]
+    for upper, lower in zip(column, column[1:]):
+        upper_bottom = upper.y + upper.height
+        if lower.y >= upper_bottom:
+            continue
+        cut = (lower.y + upper_bottom) // 2
+        if cut <= upper.y or cut >= lower.y + lower.height:
+            continue
+        upper.height = max(1, cut - upper.y)
+        gap = lower.y + lower.height - cut
+        lower.height = max(1, gap)
+        lower.y = cut
 
 
 def _score_box(box: RegionBox, red_mask: Image.Image) -> int:
@@ -792,6 +821,7 @@ class RegionEngine:
                     text="\n".join(line.text for line in ocr_lines),
                     regions=ocr_regions,
                     warnings=warnings,
+                    lines=list(ocr_lines),
                 )
             warnings.append("已识别文字，但未找到题目编号，改用版面切分")
 
@@ -941,7 +971,14 @@ class RegionEngine:
                 cur.detection_status = "overlap"
                 warnings.append(f"区域 {cur.label} 与上一区域重叠，建议人工复核")
 
-        return PageAnalysis(width=width, height=height, text=full_text, regions=regions, warnings=warnings)
+        return PageAnalysis(
+            width=width,
+            height=height,
+            text=full_text,
+            regions=regions,
+            warnings=warnings,
+            lines=list(ocr_lines),
+        )
 
 
 _engine: RegionEngine | None = None

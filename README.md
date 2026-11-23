@@ -14,6 +14,7 @@
 | 自动切题 | 行投影版面分析 → 题目区域坐标（x / y / width / height） |
 | 批改识别 | 红笔像素分析 + 叉号/对勾形状判别 → 0–100 错题概率 |
 | 错题确认工作台 | **在原图上单击 `+` / `✓` 确认**，无弹窗；右侧错题篮可定位跳转 |
+| 题目插图 | 题干始终是**文字**，可从原试卷单独裁出插图（装置图、电路、曲线、结构模型），打印时按「文字 + 图」重排 |
 | 批量操作 | 全选 / 全不选 / 仅选 AI 推荐 / 按档位筛选 |
 | 错题库 | 搜索、学科/知识点筛选、难度、错误次数排序、标签 |
 | AI 分析 | OpenAI / DeepSeek / GLM / Gemini / Claude / Ollama 统一接口，失败自动降级 |
@@ -163,7 +164,7 @@ docs/            产品、架构、数据库、UI、测试、安全文档；RFC 
 database/        schema.sql（SQLite / 与 ORM 保持一致）
 backend/app/     FastAPI 应用
   api/           路由：auth / papers / mistakes / reviews / analytics / ai / export
-  services/      ocr（区域引擎） / ai / dedup / review / export
+  services/      ocr（区域引擎） / figures（插图裁切） / ai / dedup / review / export
   models.py      SQLAlchemy 模型
 frontend/src/    Vue3 + TS + NaiveUI
   views/WorkspaceView.vue   错题确认工作台（核心交互）
@@ -178,6 +179,7 @@ deploy/          Dockerfile / docker-compose.yml / .env.example
 4. **单一写入口**：只有 `POST /papers/{id}/commit` 会创建错题记录，便于审计与限流。
 5. **监管只读**：管理员能看不能改，避免越权写入破坏数据归属与审计链。
 6. **SW 不缓存 API**：共享设备上换账号不会看到上一个账号的残留数据。
+7. **题干是文字，图才是图片**：整题截图无法重新排版打印，所以题干以 OCR 文本存储，只有试卷中真正的插图（装置图、电路、曲线、结构模型）按矩形单独裁出，随错题一起排版与导出。
 
 ## 测试
 
@@ -193,6 +195,12 @@ deploy/          Dockerfile / docker-compose.yml / .env.example
 
 # 账号体系：用户名/邮箱登录、数据隔离、管理员只读监管、PWA 端点
 .venv/Scripts/python backend/tests/test_accounts.py
+
+# 题目插图：只裁插图不截图、表格不误判、边缘装饰与分栏线不误判、旧记录补图
+.venv/Scripts/python backend/tests/test_figures.py
+
+# 旧记录转换：整题截图 → 题干文字 + 插图，幂等、不误配题、缺图不致命
+.venv/Scripts/python backend/tests/test_figurerepair.py
 ```
 
 前端类型检查与构建：

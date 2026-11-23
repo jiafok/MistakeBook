@@ -119,6 +119,23 @@
 
 `200` → paper；`409` 页面图片不可用（存储丢失）。
 
+### POST /papers/{paper_id}/repair-figures
+
+为**旧版本分析过的试卷**重新找出题目插图。旧版本把整题裁成一张截图存进
+`mistakes.question_image_key`，而错题本要批量重排打印，截图无法重排、无法搜索。
+该端点用已保存的页面图片重新定位插图矩形，回填到区域和已收录的错题上：
+
+```json
+{ "regions": 9, "figures": 3, "mistakes": 3 }
+```
+
+- 只处理 `figures_json` 从未计算过（`null`）的区域，已算过的不会被改写。
+- 区域与新的检测框按**几何重叠（IoU ≥ 0.5）**匹配，不按题号顺序；旧引擎的题号可能不同。
+- 题目文字不会被改动；截图引用在插图补齐后清空（文件保留在磁盘上，可回退）。
+- 幂等：第二次调用返回全 0。
+
+服务启动时会自动对符合条件的记录执行同样的修复，正常安装只多一次索引查询。
+
 ### GET /papers/{paper_id}/workspace
 
 工作台数据源（`regions[].x/y/width/height` 是**原图像素坐标**，前端据此在原图上叠加可点选方框）：
@@ -194,9 +211,23 @@
 `PATCH` 可更新 `subject`、`difficulty`、`note`、`status`、`tags`、`knowledge_points`、
 `error_reason`、`correct_solution`。
 
-### POST /mistakes/{id}/review-plan
+`GET` 响应中与打印相关的字段：
 
-为错题创建复习计划（已存在 pending 计划则复用）。`201`。
+| 字段 | 含义 |
+| --- | --- |
+| `text` | 题干**文字**（永远不是图片，可重排、可搜索、可打印） |
+| `figures[]` | 从原试卷裁出的插图（装置图、电路、曲线、结构模型） |
+| `image_url` | **仅旧记录**的整题截图，新记录为空 |
+
+### GET /mistakes/{id}/figures/{index}
+
+返回该错题第 `index` 张插图的 PNG（同样接受 `?token=<jwt>`）。
+`404` 表示索引越界或图片不可用。
+
+### GET /mistakes/{id}/image
+
+返回旧版本的整题截图（`404` 表示该记录没有截图）。新记录不会写入此字段：
+题干是文字，只有插图是图片。
 
 ## 复习
 

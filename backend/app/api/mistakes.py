@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
 from sqlalchemy import func, or_, select
@@ -19,12 +22,23 @@ from ..models import (
     QuestionTag,
     User,
 )
-from ..schemas import MistakeOut, MistakePageOut, MistakeUpdate
+from ..schemas import MistakeFigureOut, MistakeOut, MistakePageOut, MistakeUpdate
 from ..services.dedup import content_hash
+from ..services.figures import load_figure_set
+from ..services.redraw import render_png, trace_figure
 from ..services.review import create_plan
 from ..storage import StorageError, get_storage
 
 router = APIRouter(prefix="/mistakes", tags=["mistakes"])
+
+# Figure URLs must be absolute for <img>: the router is mounted under the API
+# prefix, so a bare "/mistakes/..." path would not resolve in the browser.
+API_PREFIX = "/api/v1"
+
+
+def _figure_list(mistake: Mistake) -> list[dict[str, object]]:
+    return load_figure_set(mistake.figures_json) or []
+
 
 
 def _analysis_for(db: Session, question_id: int) -> AiAnalysis | None:
@@ -43,8 +57,6 @@ def _to_out(db: Session, mistake: Mistake) -> MistakeOut:
     kps = [kp.name for kp in (question.knowledge_points if question else [])]
     tags = [t.name for t in (question.tags if question else [])]
 
-    import json
-
     steps: list[str] = []
     if analysis is not None:
         try:
@@ -54,9 +66,21 @@ def _to_out(db: Session, mistake: Mistake) -> MistakeOut:
         except json.JSONDecodeError:
             steps = []
 
+    figures = [
+        MistakeFigureOut(
+            index=index,
+            url=f"{API_PREFIX}/mistakes/{mistake.id}/figures/{index}",
+            width=int(item.get("width", 0) or 0),
+            height=int(item.get("height", 0) or 0),
+        )
+        for index, item in enumerate(_figure_list(mistake))
+    ]
+
     return MistakeOut(
         id=mistake.id,
         question_id=mistake.question_id,
+        paper_id=mistake.paper_id,
+        region_id=mistake.region_id,
         label=question.label if question else "",
         text=question.text if question else "",
         answer_text=question.answer_text if question else "",
@@ -75,15 +99,14 @@ def _to_out(db: Session, mistake: Mistake) -> MistakeOut:
         # Full path, not router.prefix: the router is mounted under settings.api_prefix
         # and <img> cannot resolve a bare "/mistakes/..." path.
         image_url=(
-            f"/api/v1/mistakes/{mistake.id}/image" if mistake.question_image_key else ""
+            f"{API_PREFIX}/mistakes/{mistake.id}/image" if mistake.question_image_key else ""
         ),
+        figures=figures,
         created_at=mistake.created_at,
     )
 
 
 def _json_list(raw: str) -> list[str]:
-    import json
-
     try:
         parsed = json.loads(raw or "[]")
         return [str(x) for x in parsed] if isinstance(parsed, list) else []
@@ -260,10 +283,10 @@ def get_mistake_image(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
-    """Serve the original pixels of this question, cut from the paper image.
+    """Serve the legacy whole-question screenshot, when one was stored.
 
-    The mistake book must show the question exactly as printed, so the crop is the
-    authoritative view and the OCR text is only a searchable alongside.
+    New mistakes do not create this screenshot: the question is text and only the
+    drawings are pictures. The endpoint stays so older rows keep rendering.
     """
     mistake = db.get(Mistake, mistake_id)
     if mistake is None or mistake.user_id != user.id:
@@ -279,3 +302,69 @@ def get_mistake_image(
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+@router.get("/{mistake_id}/figures/{index}")
+def get_mistake_figure(
+    mistake_id: int,
+    index: int,
+    raw: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Serve one picture lifted out of the original paper for this mistake.
+
+    By default the picture is the *redrawn* one: its ink is traced into polygons and
+    the words printed inside it are put back as real text, so the screen shows the
+    same clean drawing the printer will get instead of a photograph of paper. Pass
+    ``?raw=1`` to get the stored crop, which is what a trace is built from.
+    """
+    mistake = db.get(Mistake, mistake_id)
+    if mistake is None or mistake.user_id != user.id:
+        raise HTTPException(status_code=404, detail="错题不存在")
+
+    figures = _figure_list(mistake)
+    if index < 0 or index >= len(figures):
+        raise HTTPException(status_code=404, detail="图片不存在")
+    entry = figures[index]
+    key = str(entry.get("key") or "")
+    if not key:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    try:
+        data = get_storage().read(key)
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail="图片不可用") from exc
+
+    if not raw:
+        # A trace that fails falls back to the crop, so a picture is never lost.
+        data = _redrawn_figure(key, data, entry).getvalue()
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+# Tracing is pure work on immutable input, so a small cache removes the cost from
+# every repeat view. The stored crop never changes for a given key, which is what
+# makes the key safe as a cache key.
+_REDRAWN_CACHE: dict[str, bytes] = {}
+_REDRAWN_CACHE_LIMIT = 64
+
+
+def _redrawn_figure(key: str, data: bytes, entry: dict[str, object]) -> io.BytesIO:
+    """The trace of ``data`` at screen resolution, or the crop if it cannot be traced."""
+    cached = _REDRAWN_CACHE.get(key)
+    if cached is not None:
+        return io.BytesIO(cached)
+
+    drawing = trace_figure(data, entry.get("labels"))
+    if drawing is None:
+        return io.BytesIO(data)
+
+    # 2x is crisp on a high-DPI phone without the 300 DPI print render's weight.
+    redrawn = render_png(drawing, 2.0)
+    if len(_REDRAWN_CACHE) >= _REDRAWN_CACHE_LIMIT:
+        _REDRAWN_CACHE.pop(next(iter(_REDRAWN_CACHE)))
+    _REDRAWN_CACHE[key] = redrawn
+    return io.BytesIO(redrawn)

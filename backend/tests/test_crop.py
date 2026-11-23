@@ -1,9 +1,13 @@
-"""Regression tests for the original-question crop.
+"""Regression tests for the pixel cutter.
 
-The mistake book must show the question exactly as printed, so the crop has to be a
-faithful copy of the page pixels. These tests pin the properties that make it
-faithful: no resampling loss of content, clamping at page edges, and never writing an
-empty crop.
+``crop_region`` is the low-level rectangle cutter used for the drawings lifted out
+of a paper (and, historically, for whole-question screenshots). These tests pin the
+properties that make it trustworthy as a cutter: content is never lost, boxes are
+clamped at the page edges, and a degenerate box is rejected instead of writing a
+blank file.
+
+The *product* rule - a question is text, only its drawings are pictures - is
+enforced in ``tests/test_figures.py``.
 """
 
 import io
@@ -84,7 +88,7 @@ try:
 except ValueError:
     check("zero-size region rejected", True)
 
-# --- 5. the storage key is stable so re-committing overwrites ------------
+# --- 5. the storage key is stable so a re-run overwrites -----------------
 check("crop key is stable", crop_key(1, 86) == crop_key(1, 86), crop_key(1, 86))
 check(
     "crop key is per user and question",

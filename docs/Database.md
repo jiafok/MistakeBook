@@ -85,6 +85,7 @@ erDiagram
 | wrong_probability | smallint | 0–100，可空（评估失败） |
 | band | text | 由概率派生：`recommended` / `suspected` / `normal` / `unknown` |
 | detection_status | text | `ok` / `incomplete` / `overlap` / `invalid` |
+| figures_json | text | 本题内插图的矩形列表（JSON，页面像素坐标），见 3.3.1 |
 | created_at | timestamp | UTC |
 
 **关于 `is_selected` 的设计决策（重要）**
@@ -116,6 +117,27 @@ erDiagram
 - `CHECK (width > 0 AND height > 0 AND x >= 0 AND y >= 0)`
 - 应用层校验 `x + width <= question_images.width`、`y + height <= question_images.height`（部分数据库不支持跨表 CHECK）。
 
+#### 3.3.1 `figures_json`（题目插图矩形）
+
+**题干永远是文字，只有插图是图片。** 整题截图无法重排、无法搜索，打印时也只能按拍照
+分辨率输出，所以错题本不能把一道题存成一张图。可复用文字存 `questions.text`；真正无法
+用文字表达的（装置图、电路、曲线、结构模型）才作为矩形单独裁出。
+
+```json
+{ "v": 2, "items": [ { "x": 413, "y": 378, "width": 91, "height": 89 } ] }
+```
+
+| 键 | 含义 |
+| --- | --- |
+| `v` | 检测算法版本。版本不符视为“尚未计算”，避免沿用旧算法的结果 |
+| `items[].x/y/width/height` | 插图的矩形，**页面像素坐标**，与区域坐标同一坐标系 |
+| `items[].labels` | 图内印刷文字（`t/x/y/w/h`）。它们会从题干文字里移除，并在导出时按原位重绘 |
+
+关键约定：
+
+- `figures_json = '[]'` 表示“已算过，本题没有插图”；
+- 列缺失/为空/NULL 表示“尚未计算”，启动修复与 `repair-figures` 只处理这种行。
+
 ### 3.4 `question_region_selections`（选择草稿）
 
 | 列 | 类型 | 说明 |
@@ -140,6 +162,8 @@ erDiagram
 | question_id | FK → questions.id | 题目 |
 | paper_id | FK → papers.id | 来源试卷 |
 | question_region_id | FK → question_regions.id，可空 | 来源区域，用于追溯 |
+| question_image_key | text | **仅旧记录**：整题截图的存储键。新记录为空 |
+| figures_json | text | 本题插图列表（`{"v","items"}`，见 3.3.1），打印时随题干重排 |
 | selection_source | text | `user_explicit` / `ai_preselected_accepted` / `imported`，用于分析预选质量 |
 | wrong_probability_snapshot | smallint | 收录时概率快照，避免后续重算改变历史 |
 | wrong_count | int | 错误次数，默认 1 |
@@ -151,6 +175,11 @@ erDiagram
 索引：`(user_id, status, created_at desc)`、`(user_id, paper_id)`、`(question_id)`。
 
 > `wrong_probability_snapshot` 与 `selection_source` 是 V1.1 新增：前者让历史统计不受模型调整影响，后者让后续能评估“85 预选”的实际准确率。
+
+> `figures_json` 与 `question_image_key` 的关系：截图字段是**历史兼容**。旧版本把整题裁成
+> 一张图；新版本只存文字 + 插图。启动时的修复会把旧记录转成新形态并清空截图引用（文件
+> 保留在磁盘，便于回退）。判定“还需要修复”的条件正是
+> `question_image_key != '' AND figures_json = '[]'`。
 
 ### 3.6 其余表（按 PRD 要求，结构从简）
 

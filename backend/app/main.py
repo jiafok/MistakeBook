@@ -35,7 +35,31 @@ async def lifespan(app: FastAPI):
     init_db()
     settings.storage_dir.mkdir(parents=True, exist_ok=True)
     logger.info("MistakeBook AI started | db=%s storage=%s", settings.database_url, settings.storage_dir)
+    _repair_legacy_mistakes()
     yield
+
+
+def _repair_legacy_mistakes() -> None:
+    """Upgrade records that still print as a screenshot of the question.
+
+    An older build stored a mistake by cropping the whole question out of the paper,
+    which cannot be re-typeset or searched when the book is printed. The drawings can
+    be re-located from the stored page image, so the conversion is done here once
+    instead of asking the user to re-submit every old mistake by hand. Any failure
+    is logged and ignored: a broken repair must never block startup.
+    """
+    from .db import SessionLocal
+    from .services.figurerepair import figures_need_repair, repair_legacy_records
+    from .services.ocr import get_region_engine
+    from .storage import get_storage
+
+    try:
+        with SessionLocal() as db:
+            if not figures_need_repair(db):
+                return
+            repair_legacy_records(db, storage=get_storage(), engine=get_region_engine())
+    except Exception as exc:  # noqa: BLE001 - startup must never fail on this
+        logger.warning("legacy figure repair skipped: %s", exc)
 
 
 app = FastAPI(

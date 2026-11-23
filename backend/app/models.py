@@ -211,6 +211,10 @@ class QuestionRegion(Base, TimestampMixin):
     wrong_probability: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     band: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
     detection_status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    # Graphics inside this question, in page pixel space, as a JSON list of
+    # {"x","y","width","height"}. The question *text* stays text; only these
+    # rectangles are carried over as pictures when the mistake is printed.
+    figures_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
     paper: Mapped["Paper"] = relationship(back_populates="regions")
     page: Mapped["PaperPage"] = relationship(back_populates="regions")
@@ -259,6 +263,10 @@ class Mistake(Base, TimestampMixin):
         ForeignKey("question_regions.id", ondelete="SET NULL"), nullable=True
     )
     question_image_key: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    # Pictures lifted out of the original paper (figures, apparatus, tables), as a
+    # JSON list of {"key","width","height"}. They are re-inserted after the question
+    # text on screen and in every export, so the printed book keeps text as text.
+    figures_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     selection_source: Mapped[str] = mapped_column(String(32), nullable=False, default="user_explicit")
     wrong_probability_snapshot: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     wrong_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

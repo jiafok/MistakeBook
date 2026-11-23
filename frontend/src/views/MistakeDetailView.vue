@@ -5,8 +5,6 @@ import {
   NAlert,
   NButton,
   NCard,
-  NCollapse,
-  NCollapseItem,
   NDescriptions,
   NDescriptionsItem,
   NDivider,
@@ -28,19 +26,31 @@ const message = useMessage()
 
 const id = computed(() => Number(route.params.id))
 
-// The cropped original page pixels for this question, if a crop was saved.
-const questionImage = computed(() => api.mistakeImageUrl(mistake.value?.image_url ?? ''))
 const mistake = ref<Mistake | null>(null)
 const loading = ref(true)
 const analyzing = ref(false)
 const editing = ref(false)
-const previewOpen = ref(false)
+const previewSrc = ref('')
+
+// Drawings lifted out of the paper; the question body itself is always text so it
+// can be re-typeset and printed with the rest of the mistake book.
+const figures = computed(() =>
+  (mistake.value?.figures ?? []).map((figure) => ({
+    ...figure,
+    src: api.authImageUrl(figure.url),
+  })),
+)
+
+// Whole-question screenshots only exist on mistakes recorded before figures were
+// split out, so they are shown as a fallback with a note.
+const legacyImage = computed(() => api.authImageUrl(mistake.value?.image_url ?? ''))
 
 const editSubject = ref('')
 const editDifficulty = ref(3)
 const editSolution = ref('')
 const editKps = ref('')
 const editTags = ref('')
+const repairing = ref(false)
 
 const practiceCount = ref(5)
 const practiceLoading = ref(false)
@@ -138,6 +148,29 @@ async function remove() {
   }
 }
 
+/**
+ * A record made by an older build has no pictures, only a screenshot of the whole
+ * question. Its drawings can be located again from the stored page, which is what
+ * turns an unprintable screenshot back into text plus figures.
+ */
+async function repairLegacyFigures() {
+  if (!mistake.value?.paper_id) return
+  repairing.value = true
+  try {
+    const result = await api.repairFigures(mistake.value.paper_id)
+    if (result.figures > 0) {
+      message.success(`已找出 ${result.figures} 张插图，并更新了 ${result.mistakes} 条错题`)
+    } else {
+      message.warning('这道题在试卷里没有可裁出的插图，题干文字已经可以正常打印')
+    }
+    await load()
+  } catch (error) {
+    message.error(apiErrorMessage(error))
+  } finally {
+    repairing.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -162,34 +195,63 @@ onMounted(load)
       <NEmpty v-if="!loading && !mistake" description="题目不存在" />
 
       <template v-else-if="mistake">
-        <NCard :bordered="false" class="detail-card image-card" title="原题（与试卷完全一致）">
-          <!-- The crop is the printed question itself, so nothing can drift from
-               the paper: figures, table rules, fractions and symbols are intact. -->
-          <div v-if="questionImage" class="question-image-wrap">
-            <img
-              class="question-image"
-              :src="questionImage"
-              :alt="mistake.label || '原题'"
-              @click="previewOpen = true"
-            />
-            <div class="image-hint">点击可放大查看</div>
-          </div>
-          <NAlert v-else type="warning" :bordered="false" title="这条错题没有原图">
-            该错题是在生成原图功能之前记录的。到对应试卷的「框选题目」页重新提交一次，
-            就会自动保存原题截图。
+        <NCard :bordered="false" class="detail-card" title="题干">
+          <!-- The question body is text, not a screenshot, so it can be re-typeset
+               for printing. Only the drawings are lifted out of the paper. -->
+          <NAlert
+            v-if="!mistake.region_id"
+            type="warning"
+            :bordered="false"
+            title="这道题的原文可能不准确"
+            style="margin-bottom: 12px"
+          >
+            它最初是在旧版本里收录的，当时切题按整栏划分，无法判断对应的是哪一道题。
+            建议到「框选题目」页重新选中这道题，或直接在上方「编辑」里改成正确题干。
           </NAlert>
+          <div class="question-text">{{ mistake.text || '（无识别文本）' }}</div>
+
+          <template v-if="figures.length">
+            <NDivider style="margin: 14px 0" />
+            <div class="answer-label">题目插图（{{ figures.length }} 张）</div>
+            <div class="figure-list">
+              <figure v-for="figure in figures" :key="figure.index" class="figure-item">
+                <img
+                  :src="figure.src"
+                  :alt="`${mistake.label || '题目'} 插图 ${figure.index + 1}`"
+                  :width="figure.width || undefined"
+                  :height="figure.height || undefined"
+                  loading="lazy"
+                  @click="previewSrc = figure.src"
+                />
+                <figcaption>图 {{ figure.index + 1 }}</figcaption>
+              </figure>
+            </div>
+          </template>
+
+          <template v-else-if="legacyImage">
+            <NDivider style="margin: 14px 0" />
+            <NAlert type="info" :bordered="false" title="这张图来自旧版本的整题截图">
+              旧记录把整道题存成了图片，打印时无法重新排版。点下面的按钮会从原试卷里重新找出插图，
+              之后这道题就是「题干文字 + 插图」，可以直接打印。
+            </NAlert>
+            <NSpace style="margin: 10px 0">
+              <NButton
+                size="small"
+                type="primary"
+                :loading="repairing"
+                :disabled="!mistake.paper_id"
+                @click="repairLegacyFigures"
+              >
+                重新找出插图
+              </NButton>
+            </NSpace>
+          </template>
 
           <template v-if="mistake.answer_text">
             <NDivider style="margin: 14px 0" />
             <div class="answer-label">学生答案</div>
             <div class="answer-text">{{ mistake.answer_text }}</div>
           </template>
-
-          <NCollapse style="margin-top: 14px">
-            <NCollapseItem title="识别文字（用于搜索与导出，可能与原题有差异）" name="ocr">
-              <div class="question-text">{{ mistake.text || '（无识别文本）' }}</div>
-            </NCollapseItem>
-          </NCollapse>
         </NCard>
 
         <NCard :bordered="false" class="detail-card" title="基础信息">
@@ -304,8 +366,8 @@ onMounted(load)
     </NSpin>
 
     <!-- Full-screen view so small print and figure labels stay readable on a phone. -->
-    <div v-if="previewOpen && questionImage" class="image-preview" @click="previewOpen = false">
-      <img :src="questionImage" :alt="mistake?.label || '原题'" />
+    <div v-if="previewSrc" class="image-preview" @click="previewSrc = ''">
+      <img :src="previewSrc" :alt="mistake?.label || '原题'" />
       <div class="preview-hint">点击任意处关闭</div>
     </div>
   </div>
@@ -319,8 +381,40 @@ onMounted(load)
 }
 
 .image-card :deep(.n-card-content) {
-  /* The crop is the whole point of this card, so give it the width back. */
+  /* A legacy full-question screenshot is the point of that card: give it the width. */
   padding: 8px;
+}
+
+.figure-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.figure-item {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  text-align: center;
+}
+
+.figure-item img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  margin: 0 auto;
+  cursor: zoom-in;
+}
+
+.figure-item figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
 }
 
 .question-image-wrap {
@@ -417,7 +511,7 @@ onMounted(load)
 
 .muted {
   font-size: 12px;
-  color: #9aa3af;
+  color: #9aa3baf;
 }
 
 .practice-list {

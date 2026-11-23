@@ -140,6 +140,48 @@ def test_header_lines_are_not_questions() -> None:
     assert groups[0][0].text.startswith("1.")
 
 
+def test_consecutive_question_boxes_never_overlap() -> None:
+    """Overlapping boxes make the on-image selection UI inaccurate.
+
+    OCR boxes are taller than the printed glyphs and a small padding is added on
+    each side, so consecutive questions used to overlap by a few dozen pixels. In
+    the workspace the box drawn on top wins a tap, which meant clicking near a
+    boundary selected the neighbouring question.
+    """
+    lines = [
+        _line(80, 200, 500, 260, "1.第一题题干"),
+        _line(90, 250, 500, 310, "A.选项甲"),
+        _line(80, 280, 500, 340, "2.第二题题干"),
+        _line(90, 330, 500, 390, "A.选项乙"),
+        _line(80, 360, 500, 420, "3.第三题题干"),
+    ]
+    regions = _regions_from_ocr_lines(lines, 1000, 1200, split_x=None)
+    assert len(regions) == 3, [r.text for r in regions]
+
+    for index, upper in enumerate(regions):
+        for lower in regions[index + 1 :]:
+            overlap_top = max(upper.y, lower.y)
+            overlap_bottom = min(upper.y + upper.height, lower.y + lower.height)
+            assert overlap_bottom <= overlap_top, (
+                f"boxes {upper.label} and {lower.label} overlap by"
+                f" {overlap_bottom - overlap_top}px"
+            )
+
+
+def test_boxes_stay_ordered_and_non_degenerate_after_separation() -> None:
+    lines = [
+        _line(80, 200, 500, 260, "1.第一题题干"),
+        _line(90, 250, 500, 310, "A.选项甲"),
+        _line(80, 280, 500, 340, "2.第二题题干"),
+        _line(90, 330, 500, 390, "A.选项乙"),
+    ]
+    regions = _regions_from_ocr_lines(lines, 1000, 1200, split_x=None)
+    tops = [r.y for r in regions]
+    assert tops == sorted(tops), tops
+    assert all(r.height > 0 for r in regions), [r.height for r in regions]
+    assert all(r.y >= 0 for r in regions), [r.y for r in regions]
+
+
 if __name__ == "__main__":
     test_exif_orientation_is_applied_before_storage()
     print("ok  EXIF orientation applied")
@@ -157,4 +199,8 @@ if __name__ == "__main__":
     print("ok  algebraic x is not a grading mark")
     test_header_lines_are_not_questions()
     print("ok  header lines excluded")
+    test_consecutive_question_boxes_never_overlap()
+    print("ok  consecutive boxes never overlap")
+    test_boxes_stay_ordered_and_non_degenerate_after_separation()
+    print("ok  boxes stay ordered after separation")
     print("ALL OCR CHECKS PASSED")

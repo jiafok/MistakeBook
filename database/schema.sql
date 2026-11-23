@@ -99,6 +99,10 @@ CREATE TABLE IF NOT EXISTS question_regions (
     wrong_probability  INTEGER      CHECK (wrong_probability IS NULL OR (wrong_probability >= 0 AND wrong_probability <= 100)),
     band               VARCHAR(16)  NOT NULL DEFAULT 'unknown',
     detection_status   VARCHAR(16)  NOT NULL DEFAULT 'ok',
+    -- Graphics inside this question, in page pixel space, as JSON
+    -- {"v":2,"items":[{"x","y","width","height"}]}. The question *text* stays
+    -- text; only these rectangles are carried over as pictures when printing.
+    figures_json       TEXT         NOT NULL DEFAULT '[]',
     created_at         DATETIME     NOT NULL,
     updated_at         DATETIME     NOT NULL,
     CHECK (width > 0 AND height > 0 AND x >= 0 AND y >= 0)
@@ -130,6 +134,10 @@ CREATE TABLE IF NOT EXISTS mistakes (
     paper_id                  INTEGER     REFERENCES papers(id) ON DELETE SET NULL,
     region_id                 INTEGER     REFERENCES question_regions(id) ON DELETE SET NULL,
     question_image_key        VARCHAR(512) NOT NULL DEFAULT '',
+    -- Pictures lifted out of the paper (apparatus, circuits, curves), as JSON
+    -- {"v":2,"items":[{"key","width","height","labels"}]}. They are re-inserted
+    -- after the question text, so the printed book keeps text as text.
+    figures_json              TEXT        NOT NULL DEFAULT '[]',
     selection_source          VARCHAR(32) NOT NULL DEFAULT 'user_explicit',
     wrong_probability_snapshot INTEGER,
     wrong_count               INTEGER     NOT NULL DEFAULT 1,

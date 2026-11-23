@@ -1,17 +1,14 @@
-"""Cut a question's own pixels out of the page image.
+"""Cut a rectangle out of a stored page image.
 
-Why crop instead of rebuilding text
------------------------------------
-OCR assembly can never be *identical* to the printed question: small figure labels
-are missed by the detector, maths such as ``12m/n`` loses its fraction bar, and
-chemical symbols come back mangled. For a mistake book the requirement is that the
-reviewed question reads exactly like the original paper, so the dependable answer is
-to keep the original pixels of the question region.
+This is a plain pixel cutter, not the way a question is represented. The mistake
+book stores the question as **text** (``Question.text``) so the book can be
+re-typeset and printed in bulk; only the drawings that no OCR can reproduce travel
+as pictures, and those are detected and cropped by
+:mod:`app.services.figures`.
 
-The crop is taken straight from the stored page image, so it carries the figure, the
-table rules, the subscripts and the answer mark exactly as printed. Text is still
-stored alongside for search, AI analysis and export, but it is no longer what the
-learner reads.
+The whole-question crop this module can produce is therefore legacy: rows recorded
+before figures existed still own a ``question_image_key`` and are still served from
+it, but new mistakes store no such screenshot.
 """
 
 from __future__ import annotations
@@ -32,13 +29,14 @@ CROP_SCALE = 1.6
 PAD_X_RATIO = 0.02
 PAD_Y_RATIO = 0.015
 
+
 def crop_region(
     page_data: bytes,
     region: QuestionRegion,
     page_width: int,
     page_height: int,
 ) -> bytes:
-    """Return PNG bytes for one question region cut from the page image.
+    """Return PNG bytes for one rectangle cut from the page image.
 
     ``region`` coordinates are in the page's own pixel space. They are clamped to the
     real image size, because a stored box may predate a re-analysis and sit a pixel
@@ -87,5 +85,5 @@ def crop_region(
 
 
 def crop_key(user_id: int, question_id: int) -> str:
-    """Stable storage key so re-committing overwrites instead of duplicating."""
+    """Legacy whole-question screenshot key; no longer written by new commits."""
     return f"mistakes/{user_id}/q{question_id}.png"

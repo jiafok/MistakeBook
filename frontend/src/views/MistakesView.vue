@@ -191,8 +191,16 @@ onMounted(async () => {
             <NTag size="small" :bordered="false">{{ item.subject }}</NTag>
           </div>
 
-          <!-- The crop is the printed question, so the card previews the real thing. -->
-          <div v-if="item.image_url" class="card-thumb">
+          <!-- The card previews the real thing: the question text plus, when the
+               paper had one, its figure. Nothing is a screenshot of the text. -->
+          <div v-if="item.figures?.length" class="card-thumb">
+            <img
+              :src="api.authImageUrl(item.figures[0].url)"
+              :alt="`${item.label || '题目'} 插图`"
+              loading="lazy"
+            />
+          </div>
+          <div v-else-if="item.image_url" class="card-thumb">
             <img :src="api.mistakeImageUrl(item.image_url)" :alt="item.label || '原题'" loading="lazy" />
           </div>
           <div v-else class="card-text mb-text-clamp">{{ item.text || '（无识别文本）' }}</div>

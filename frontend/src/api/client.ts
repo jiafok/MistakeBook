@@ -5,6 +5,7 @@ import type {
   Analytics,
   AnalysisResult,
   CommitResult,
+  FigureRepairResult,
   KnowledgePoint,
   Mistake,
   MistakePage,
@@ -161,6 +162,18 @@ export const api = {
     return data
   },
 
+  /**
+   * Re-derive question figures for a paper analysed by an older build.
+   *
+   * Those papers have no figure rectangles, so their mistakes still print a
+   * screenshot of the whole question. Nothing is re-OCR'd: only the drawings are
+   * located again, from the page images that are already stored.
+   */
+  async repairFigures(id: number): Promise<FigureRepairResult> {
+    const { data } = await http.post<FigureRepairResult>(`/papers/${id}/repair-figures`)
+    return data
+  },
+
   async workspace(paperId: number): Promise<Workspace> {
     const { data } = await http.get<Workspace>(`/papers/${paperId}/workspace`)
     return data
@@ -190,6 +203,11 @@ export const api = {
     const token = localStorage.getItem(TOKEN_KEY)
     const suffix = token ? `?token=${encodeURIComponent(token)}` : ''
     return `${imageUrl}${suffix}`
+  },
+
+  /** Authenticated URL for any API image path (question figure, page, legacy crop). */
+  authImageUrl(imageUrl: string): string {
+    return this.mistakeImageUrl(imageUrl)
   },
 
   async listMistakes(params: Record<string, string | number | undefined>): Promise<MistakePage> {

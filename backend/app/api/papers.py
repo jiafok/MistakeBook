@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import uuid
 from pathlib import Path
 
@@ -36,15 +37,38 @@ from ..schemas import (
     SelectionPatch,
     WorkspaceOut,
 )
-from ..services.crop import crop_key, crop_region
 from ..services.dedup import content_hash
+from ..services.figures import (
+    FigureBox,
+    detect_page_figures,
+    dump_figure_set,
+    load_figure_set,
+    store_figures,
+)
+from ..services.figurerepair import repair_paper
 from ..services.ocr import get_region_engine
 from ..services.subject import detect_subject as infer_subject
 from ..storage import StorageError, get_storage
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
+logger = logging.getLogger("mistakebook.papers")
+
 MAX_PIXELS = 40_000_000
+
+# A stored region and a fresh detection are the same question only when they overlap
+# this much. Re-analysis may renumber or resize boxes; below this threshold the two
+# are different questions, and letting them share an id would silently move a
+# recorded mistake onto different content.
+_REANALYZE_MATCH_IOU = 0.5
+
+# Re-anchoring an already-recorded mistake to a fresh question needs a long shared
+# run of text and a clear lead over the runner-up. The measured signal on a real
+# worksheet is strong (0.36 against 0.07 for the next candidate), so a modest
+# threshold separates "same question, re-cut" from "different question".
+_REANCHOR_MIN_RUN = 8
+_REANCHOR_MIN_SCORE = 0.2
+_REANCHOR_MARGIN = 2.0
 
 
 def _validate_magic(data: bytes, ext: str) -> bool:
@@ -96,6 +120,38 @@ def _extract_pages(data: bytes, ext: str) -> list[tuple[bytes, str]]:
     return [(buffer.getvalue(), "page-1.png")]
 
 
+def _store_figures(
+    *,
+    storage,
+    page: PaperPage,
+    region: QuestionRegion,
+    user_id: int,
+    question_id: int,
+) -> list[dict[str, object]]:
+    """Cut every detected picture out of the page and store it for the mistake.
+
+    Detection ran at upload time and the rectangles are on the region, so nothing
+    is recomputed here. A single unreadable page or a bad rectangle never blocks
+    recording the mistake: the text is stored either way and that figure is skipped.
+    """
+    boxes = [box for box in (FigureBox.from_dict(raw) for raw in load_figure_set(region.figures_json) or []) if box]
+    if not boxes:
+        return []
+    try:
+        page_data = storage.read(page.storage_key)
+    except StorageError:
+        return []
+    return store_figures(
+        storage,
+        page_data=page_data,
+        page_width=page.width,
+        page_height=page.height,
+        boxes=boxes,
+        user_id=user_id,
+        question_id=question_id,
+    )
+
+
 def _region_state(
     db: Session, region: QuestionRegion, user_id: int, recorded: set[int]
 ) -> tuple[bool, bool]:
@@ -108,6 +164,105 @@ def _region_state(
         return selection.is_selected, region.id in recorded
     # default: high-confidence regions are pre-selected (draft only)
     return region.band == "recommended", region.id in recorded
+
+
+def _closest_region(box, candidates):  # noqa: ANN001, ANN201
+    """The stored region that best corresponds to a fresh detection, or None.
+
+    Matching is geometric: a re-analysis may renumber questions, split a merged box
+    or move a boundary, so the order cannot be trusted. A region is only considered
+    the same question when the overlap is substantial; below that it is a different
+    question and must not inherit the old one's id (and therefore its mistake).
+    """
+    best = None
+    best_score = 0.0
+    for region in candidates:
+        score = _region_overlap(region, box)
+        if score > best_score:
+            best = region
+            best_score = score
+    return best if best_score >= _REANALYZE_MATCH_IOU else None
+
+
+def _region_overlap(region, box) -> float:  # noqa: ANN001
+    """Intersection-over-union of a stored region and a freshly detected box."""
+    left = max(region.x, box.x)
+    top = max(region.y, box.y)
+    right = min(region.x + region.width, box.x + box.width)
+    bottom = min(region.y + region.height, box.y + box.height)
+    if right <= left or bottom <= top:
+        return 0.0
+    intersection = (right - left) * (bottom - top)
+    union = region.width * region.height + box.width * box.height - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _longest_common_run(first: str, second: str) -> int:
+    """Length of the longest substring the two texts share, ignoring whitespace.
+
+    A stale region's text and a fresh question's text rarely match as whole strings
+    (one may carry a page header, the other a cleaned version), so the evidence is
+    the longest run of characters they agree on. That run is stable for Chinese,
+    which has no word boundaries to lose.
+    """
+    a = "".join(first.split())
+    b = "".join(second.split())
+    if not a or not b:
+        return 0
+    best = 0
+    previous = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        current = [0] * (len(b) + 1)
+        char = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if char == b[j - 1]:
+                run = previous[j - 1] + 1
+                current[j] = run
+                if run > best:
+                    best = run
+        previous = current
+    return best
+
+
+def _reattach_target(
+    stale_question_id: int | None,
+    candidates,
+    db: Session,
+):
+    """The new region whose question best matches the one a mistake was recorded on.
+
+    Returns None unless one candidate is convincing *and* clearly ahead of the
+    runner-up: moving a mistake onto a different question would put the wrong
+    content in the mistake book, which is worse than leaving it where it is.
+    """
+    if stale_question_id is None or not candidates:
+        return None
+    stale_question = db.get(Question, stale_question_id)
+    if stale_question is None:
+        return None
+    stale_text = stale_question.text or ""
+
+    scored: list[tuple[float, object]] = []
+    for region in candidates:
+        question = db.get(Question, region.question_id) if region.question_id else None
+        if question is None:
+            continue
+        run = _longest_common_run(stale_text, question.text or "")
+        shorter = min(len("".join(stale_text.split())), len("".join((question.text or "").split())))
+        if shorter <= 0 or run < _REANCHOR_MIN_RUN:
+            continue
+        scored.append((run / shorter, region))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_region = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score < _REANCHOR_MIN_SCORE:
+        return None
+    if second_score > 0 and best_score / second_score < _REANCHOR_MARGIN:
+        return None
+    return best_region
 
 
 @router.post("/upload", response_model=PaperOut, status_code=status.HTTP_201_CREATED)
@@ -180,6 +335,10 @@ async def upload_paper(
                 continue
 
             analysis = engine.analyze(image_bytes)
+            # Split the question into text plus the pictures it carries. The text
+            # stays text so the book can be re-typeset; only the drawings that no
+            # OCR can reproduce are kept as rectangles and cropped later.
+            figure_map = detect_page_figures(image_bytes, analysis.regions, analysis.lines)
             page = PaperPage(
                 paper_id=paper.id,
                 page_no=page_no,
@@ -198,14 +357,17 @@ async def upload_paper(
             db.flush()
 
             for box in analysis.regions:
+                figures, cleaned_text = figure_map.get(
+                    box.region_order, ([], box.text)
+                )
                 question = Question(
                     paper_id=paper.id,
                     section_id=section.id,
                     label=box.label,
-                    text=box.text,
+                    text=cleaned_text,
                     subject=paper.subject,
                     order_index=box.region_order,
-                    content_hash=content_hash(box.text or box.label),
+                    content_hash=content_hash(cleaned_text or box.label),
                 )
                 db.add(question)
                 db.flush()
@@ -224,6 +386,7 @@ async def upload_paper(
                         wrong_probability=box.wrong_probability,
                         band=box.band,
                         detection_status=box.detection_status,
+                        figures_json=dump_figure_set([f.as_dict() for f in figures]),
                     )
                 )
 
@@ -306,6 +469,8 @@ def reanalyze_paper(
     engine = get_region_engine()
 
     cleared = 0
+    reanchored = 0
+    detached = 0
     for page in sorted(paper.pages, key=lambda item: item.page_no):
         try:
             data = storage.read(page.storage_key)
@@ -313,20 +478,13 @@ def reanalyze_paper(
             raise HTTPException(status_code=409, detail=f"第 {page.page_no} 页图片不可用") from exc
 
         analysis = engine.analyze(data)
+        figure_map = detect_page_figures(data, analysis.regions, analysis.lines)
 
-        # Drop the old geometry and any selections tied to it.
-        old_regions = db.scalars(
-            select(QuestionRegion).where(QuestionRegion.page_id == page.id)
-        ).all()
-        for region in old_regions:
-            db.execute(
-                RegionSelection.__table__.delete().where(
-                    RegionSelection.region_id == region.id
-                )
+        existing = list(
+            db.scalars(
+                select(QuestionRegion).where(QuestionRegion.page_id == page.id)
             )
-            db.delete(region)
-            cleared += 1
-        db.flush()
+        )
 
         section = db.scalar(
             select(Section).where(Section.paper_id == paper.id, Section.order_index == page.page_no - 1)
@@ -336,38 +494,162 @@ def reanalyze_paper(
             db.add(section)
             db.flush()
 
+        # Re-analysis must not delete a question that a user has already recorded: a
+        # mistake points at its region and at its question, and both ids must survive
+        # so the record keeps its provenance. Existing regions are therefore matched
+        # to the new detections geometrically and updated in place; only regions that
+        # no longer exist *and* carry no mistake are removed.
+        unmatched = {region.id: region for region in existing}
+        used_questions: set[int] = set()
+        # Every region that now represents this page, collected as the loop builds
+        # them. Re-querying would miss the rows created in this same transaction:
+        # the session runs with autoflush off.
+        resolved: list[QuestionRegion] = []
+
         for box in analysis.regions:
+            figures, cleaned_text = figure_map.get(box.region_order, ([], box.text))
+            partner = _closest_region(box, list(unmatched.values()))
+            if partner is not None:
+                del unmatched[partner.id]
+                partner.x = box.x
+                partner.y = box.y
+                partner.width = box.width
+                partner.height = box.height
+                partner.page_no = page.page_no
+                partner.region_order = box.region_order
+                partner.wrong_probability = box.wrong_probability
+                partner.band = box.band
+                partner.detection_status = box.detection_status
+                partner.figures_json = dump_figure_set([f.as_dict() for f in figures])
+
+                question = db.get(Question, partner.question_id) if partner.question_id else None
+                if question is None:
+                    question = Question(paper_id=paper.id, section_id=section.id)
+                    db.add(question)
+                    db.flush()
+                    partner.question_id = question.id
+                question.section_id = section.id
+                question.label = box.label
+                question.text = cleaned_text
+                question.subject = paper.subject
+                question.order_index = box.region_order
+                question.content_hash = content_hash(cleaned_text or box.label)
+                used_questions.add(question.id)
+                resolved.append(partner)
+                continue
+
             question = Question(
                 paper_id=paper.id,
                 section_id=section.id,
                 label=box.label,
-                text=box.text,
+                text=cleaned_text,
                 subject=paper.subject,
                 order_index=box.region_order,
-                content_hash=content_hash(box.text or box.label),
+                content_hash=content_hash(cleaned_text or box.label),
             )
             db.add(question)
             db.flush()
-            db.add(
-                QuestionRegion(
-                    paper_id=paper.id,
-                    page_id=page.id,
-                    page_no=page.page_no,
-                    question_id=question.id,
-                    x=box.x,
-                    y=box.y,
-                    width=box.width,
-                    height=box.height,
-                    region_order=box.region_order,
-                    wrong_probability=box.wrong_probability,
-                    band=box.band,
-                    detection_status=box.detection_status,
+            used_questions.add(question.id)
+            new_region = QuestionRegion(
+                paper_id=paper.id,
+                page_id=page.id,
+                page_no=page.page_no,
+                question_id=question.id,
+                x=box.x,
+                y=box.y,
+                width=box.width,
+                height=box.height,
+                region_order=box.region_order,
+                wrong_probability=box.wrong_probability,
+                band=box.band,
+                detection_status=box.detection_status,
+                figures_json=dump_figure_set([f.as_dict() for f in figures]),
+            )
+            db.add(new_region)
+            resolved.append(new_region)
+
+        for stale in list(unmatched.values()):
+            mistake = db.scalar(
+                select(Mistake).where(Mistake.region_id == stale.id).limit(1)
+            )
+            if mistake is not None:
+                # The old box was cut by a different engine (often a whole column),
+                # so the mistake it holds may point at the wrong question entirely -
+                # its stored text can be a page header. Re-anchor it to the freshly
+                # detected question whose text it actually resembles, and only keep
+                # the old box when no candidate is convincing.
+                target = _reattach_target(
+                    stale.question_id, resolved, db
+                )
+                if target is not None:
+                    # A region created in this pass has no id until it is flushed,
+                    # and a mistake cannot reference a NULL region.
+                    db.flush()
+                    mistake.region_id = target.id
+                    mistake.question_id = target.question_id
+                    db.execute(
+                        RegionSelection.__table__.delete().where(
+                            RegionSelection.region_id == stale.id
+                        )
+                    )
+                    old_question_id = stale.question_id
+                    db.delete(stale)
+                    cleared += 1
+                    if (
+                        old_question_id is not None
+                        and old_question_id not in used_questions
+                        and db.scalar(
+                            select(Mistake.id)
+                            .where(Mistake.question_id == old_question_id)
+                            .limit(1)
+                        )
+                        is None
+                    ):
+                        old_question = db.get(Question, old_question_id)
+                        if old_question is not None:
+                            db.delete(old_question)
+                    continue
+                # The old box covered several questions (an old engine often cut a
+                # whole column), so nothing in the data says which question the user
+                # actually meant. Guessing would move the record onto different
+                # content, which is worse than admitting it: the mistake is kept but
+                # detached from its region, and the unusable box is dropped so the
+                # workspace stops offering it for selection.
+                mistake.region_id = None
+                db.execute(
+                    RegionSelection.__table__.delete().where(
+                        RegionSelection.region_id == stale.id
+                    )
+                )
+                old_question_id = stale.question_id
+                db.delete(stale)
+                cleared += 1
+                continue
+            db.execute(
+                RegionSelection.__table__.delete().where(
+                    RegionSelection.region_id == stale.id
                 )
             )
-
-        page.width = analysis.width
-        page.height = analysis.height
-        page.ocr_text = analysis.text
+            question_id = stale.question_id
+            db.delete(stale)
+            cleared += 1
+            # A question with no mistake and no region left is an orphan produced by
+            # this page's analysis, so it goes too.
+            if question_id is not None and question_id not in used_questions:
+                still_used = db.scalar(
+                    select(Mistake.id).where(Mistake.question_id == question_id).limit(1)
+                )
+                if still_used is None:
+                    other_region = db.scalar(
+                        select(QuestionRegion.id)
+                        .where(QuestionRegion.question_id == question_id)
+                        .limit(1)
+                    )
+                    if other_region is None:
+                        stale_question = db.get(Question, question_id)
+                        if stale_question is not None:
+                            db.delete(stale_question)
+        db.flush()
 
     # Refresh an auto-detected subject, or any subject when the caller explicitly
     # asks for re-detection. A plain reanalyze never overrides a user's choice.
@@ -383,7 +665,39 @@ def reanalyze_paper(
     paper.error_message = ""
     db.commit()
     db.refresh(paper)
+    logger.info(
+        "reanalyze paper %s | removed=%s reanchored=%s detached=%s",
+        paper.id,
+        cleared,
+        reanchored,
+        detached,
+    )
     return PaperOut.model_validate(paper)
+
+
+@router.post("/{paper_id}/repair-figures", response_model=dict)
+def repair_figures(
+    paper_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Re-derive question figures for a paper that was analysed before they existed.
+
+    Papers analysed by an older build have ``figures_json`` empty on every region,
+    and their mistakes carry a whole-question screenshot instead of text plus
+    pictures. Printing those means printing a photograph of text, which cannot be
+    re-typeset. This recomputes the figure rectangles from the stored page images
+    and backfills them onto both the regions and the recorded mistakes. Text is
+    left alone, because the stored text is already the authoritative question.
+    """
+    paper = get_owned_paper(paper_id, db, user)
+    return repair_paper(
+        db,
+        paper=paper,
+        user=user,
+        storage=get_storage(),
+        engine=get_region_engine(),
+    )
 
 
 @router.get("/{paper_id}/pages/{page_no}/image")
@@ -474,6 +788,7 @@ def get_workspace(
                 detection_status=region.detection_status,
                 is_selected=selected,
                 is_recorded=is_recorded,
+                figure_count=len(load_figure_set(region.figures_json) or ()),
             )
         )
 
@@ -594,6 +909,19 @@ def commit_selection(
         if duplicate is not None:
             duplicate.wrong_count += 1
             duplicate.updated_at = utcnow()
+            # A mistake recorded before figures were extracted has no pictures yet.
+            # Re-committing the same question is the natural moment to backfill them,
+            # otherwise the printed record would silently keep missing its diagram.
+            if not load_figure_set(duplicate.figures_json):
+                backfilled = _store_figures(
+                    storage=get_storage(),
+                    page=page,
+                    region=region,
+                    user_id=user.id,
+                    question_id=question.id,
+                )
+                if backfilled:
+                    duplicate.figures_json = dump_figure_set(backfilled)
             existing += 1
             items.append(
                 CommitItemResult(
@@ -602,86 +930,17 @@ def commit_selection(
             )
             continue
 
-        # Cut the question's own pixels out of the page so the mistake shows the
-        # printed question exactly. Text reconstruction can never be identical:
-        # figure labels are missed, fraction bars and chemical symbols are lost.
-        image_key = ""
-        try:
-            crop = crop_region(
-                get_storage().read(page.storage_key),
-                region,
-                page.width,
-                page.height,
-            )
-            image_key = crop_key(user.id, question.id)
-            get_storage().save(image_key, crop)
-        except (StorageError, ValueError, OSError):
-            # A missing crop must not block recording the mistake; the text is
-            # still stored and the UI falls back to it.
-            image_key = ""
-
         mistake = Mistake(
             user_id=user.id,
-            question_id=question.id,
             paper_id=paper.id,
+            question_id=question.id,
             region_id=region.id,
-            question_image_key=image_key,
-            selection_source=(
-                "ai_preselected_accepted"
-                if region.band == "recommended"
-                else "user_explicit"
-            ),
-            wrong_probability_snapshot=region.wrong_probability,
-            wrong_count=1,
             status="active",
+            wrong_count=1,
         )
         db.add(mistake)
-        db.flush()
         created += 1
-        items.append(
-            CommitItemResult(region_id=region.id, status="created", mistake_id=mistake.id)
-        )
+        items.append(CommitItemResult(region_id=region.id, status="created", mistake_id=mistake.id))
 
     db.commit()
-
-    # Clear draft selections for committed regions
-    db.query(RegionSelection).filter(
-        RegionSelection.user_id == user.id,
-        RegionSelection.region_id.in_([r.id for r in regions]),
-    ).delete(synchronize_session=False)
-    db.commit()
-
-    return CommitOut(created=created, existing=existing, failed=failed, items=items)
-
-
-@router.get("/{paper_id}/region/{region_id}/crop")
-def get_region_crop(
-    paper_id: int,
-    region_id: int,
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> Response:
-    paper = get_owned_paper(paper_id, db, user)
-    region = db.get(QuestionRegion, region_id)
-    if region is None or region.paper_id != paper.id:
-        raise HTTPException(status_code=404, detail="区域不存在")
-    page = db.get(PaperPage, region.page_id)
-    if page is None:
-        raise HTTPException(status_code=404, detail="页面不存在")
-    try:
-        data = get_storage().read(page.storage_key)
-    except StorageError as exc:
-        raise HTTPException(status_code=404, detail="页面图片不可用") from exc
-    image = Image.open(io.BytesIO(data)).convert("RGB")
-    box = (
-        max(0, region.x),
-        max(0, region.y),
-        min(image.width, region.x + region.width),
-        min(image.height, region.y + region.height),
-    )
-    if box[2] <= box[0] or box[3] <= box[1]:
-        raise HTTPException(status_code=400, detail="区域无效")
-    crop = image.crop(box)
-    buffer = io.BytesIO()
-    crop.save(buffer, format="PNG")
-    return Response(content=buffer.getvalue(), media_type="image/png")
+    return CommitOut(paper_id=paper.id, created=created, existing=existing, failed=failed, items=items)
