@@ -938,8 +938,26 @@ def commit_selection(
             status="active",
             wrong_count=1,
         )
+        # The question is text, so the drawings it carries are cut out of the paper
+        # and stored beside it. Without this the record prints as text with its
+        # apparatus, circuit or curve missing.
+        figure_items = _store_figures(
+            storage=get_storage(),
+            page=page,
+            region=region,
+            user_id=user.id,
+            question_id=question.id,
+        )
+        mistake.figures_json = dump_figure_set(figure_items)
+        mistake.wrong_probability_snapshot = region.wrong_probability
+        mistake.selection_source = (
+            "ai_preselected_accepted" if region.band == "recommended" else "user_explicit"
+        )
         db.add(mistake)
         created += 1
+        # The id is only assigned on flush, and the client needs it to open the record
+        # it just created (and to fetch its figures).
+        db.flush()
         items.append(CommitItemResult(region_id=region.id, status="created", mistake_id=mistake.id))
 
     db.commit()

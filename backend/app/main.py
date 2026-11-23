@@ -49,17 +49,23 @@ def _repair_legacy_mistakes() -> None:
     is logged and ignored: a broken repair must never block startup.
     """
     from .db import SessionLocal
-    from .services.figurerepair import figures_need_repair, repair_legacy_records
+    from .services.figurerepair import (
+        backfill_missing_figures,
+        figures_need_repair,
+        repair_legacy_records,
+    )
     from .services.ocr import get_region_engine
     from .storage import get_storage
 
     try:
         with SessionLocal() as db:
-            if not figures_need_repair(db):
-                return
-            repair_legacy_records(db, storage=get_storage(), engine=get_region_engine())
+            if figures_need_repair(db):
+                repair_legacy_records(db, storage=get_storage(), engine=get_region_engine())
+            # Records made by a build that extracted the text but not the drawings
+            # have nothing to convert, yet still print without their diagram.
+            backfill_missing_figures(db, storage=get_storage(), engine=get_region_engine())
     except Exception as exc:  # noqa: BLE001 - startup must never fail on this
-        logger.warning("legacy figure repair skipped: %s", exc)
+        logger.warning("figure repair skipped: %s", exc)
 
 
 app = FastAPI(

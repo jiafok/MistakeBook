@@ -45,6 +45,7 @@ from app.models import (  # noqa: E402
     User,
 )
 from app.storage import get_storage  # noqa: E402
+from app.services.figures import dump_figure_set  # noqa: E402
 
 failures = []
 
@@ -247,6 +248,71 @@ with TestClient(app) as client:
         ),
         [(r["x"], r["y"], r["width"], r["height"]) for r in second_ws["regions"]],
     )
+
+
+    # --- committing a region must carry its drawings onto the record -------
+    # An intermediate build stored the question text but dropped the drawings, so a
+    # new mistake printed as text with its diagram missing. The rectangles are
+    # already on the region, so the commit path must copy them across.
+    with SessionLocal() as db:
+        target = (
+            db.query(QuestionRegion)
+            .filter(
+                QuestionRegion.paper_id == paper_id,
+                QuestionRegion.figures_json != '{"v":2,"items":[]}',
+            )
+            .first()
+        )
+        if target is None:
+            # No drawing was detected on this synthetic page, so graft one onto a
+            # region to exercise the commit path regardless.
+            target = (
+                db.query(QuestionRegion)
+                .filter(QuestionRegion.paper_id == paper_id)
+                .first()
+            )
+            target.figures_json = dump_figure_set(
+                [{"x": 70, "y": target.y + 10, "width": 120, "height": 90}]
+            )
+            db.commit()
+        target_id = target.id
+
+    response = client.post(
+        f"/api/v1/papers/{paper_id}/commit",
+        headers=headers,
+        json={"region_ids": [target_id]},
+    )
+    check("commit succeeds", response.status_code == 200, response.text[:200])
+    created_id = ((response.json().get("items") or [{}])[0]).get("mistake_id")
+    check("commit returns the new mistake id", bool(created_id), response.json())
+    if created_id:
+        detail = client.get(f"/api/v1/mistakes/{created_id}", headers=headers).json()
+        check(
+            "a committed mistake carries its drawings",
+            len(detail.get("figures") or []) > 0,
+            detail.get("figures"),
+        )
+        # The fixture is drawn as solid bars, so OCR finds no characters: the detail
+        # must still expose a text field. Whether it has content is checked against
+        # what the question row actually holds, not against a hardcoded non-empty.
+        with SessionLocal() as db:
+            stored = db.get(Question, db.query(Mistake).filter(Mistake.id == created_id).one().question_id)
+            stored_text = (stored.text or "") if stored is not None else ""
+        check(
+            "a committed mistake carries its question text",
+            (detail.get("text") or "") == stored_text,
+            (detail.get("text"), stored_text),
+        )
+        if detail.get("figures"):
+            image = client.get(
+                f"/api/v1/mistakes/{created_id}/figures/0", headers=headers
+            )
+            check("the drawing is served", image.status_code == 200, image.status_code)
+            check(
+                "the drawing is a real image",
+                image.content[:4] == b"\x89PNG",
+                image.content[:8],
+            )
 
 print()
 if failures:

@@ -32,9 +32,10 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Mistake, Paper, Question, QuestionRegion, User
+from ..models import Mistake, Paper, PaperPage, Question, QuestionRegion, User
 from ..storage import StorageError, StorageBackend
 from .figures import (
+    FigureBox,
     detect_page_figures,
     dump_figure_set,
     load_figure_set,
@@ -258,6 +259,79 @@ def repair_legacy_records(
     return totals
 
 
+def backfill_missing_figures(
+    db: Session, *, storage: StorageBackend, engine: RegionEngine
+) -> dict[str, int]:
+    """Store the drawings of mistakes recorded before figures were extracted.
+
+    A mistake recorded by an intermediate build carries ``figures_json == "[]"`` but
+    has no legacy screenshot either, so :func:`repair_legacy_records` skips it: that
+    query looks for rows that still point at a whole-question screenshot. Those rows
+    print as text with their diagram missing, which is exactly the complaint that
+    prompted this repair.
+
+    The region still records the rectangles that were detected at upload time, so the
+    pictures are cut out from there without re-analysing the page. A region that
+    never detected a drawing is skipped: its question genuinely has none.
+    """
+    rows = db.execute(
+        select(Mistake, QuestionRegion, PaperPage)
+        .join(QuestionRegion, QuestionRegion.id == Mistake.region_id)
+        .join(PaperPage, PaperPage.id == QuestionRegion.page_id)
+        .where(
+            Mistake.status == "active",
+            Mistake.question_image_key == "",
+        )
+    ).all()
+
+    totals = {"mistakes": 0, "figures": 0}
+    for mistake, region, page in rows:
+        # Decide "already has drawings" and "region detected a drawing" from the
+        # parsed structure, not from a SQL string comparison of JSON: the serialised
+        # form is an implementation detail and an empty set can be written as either
+        # '[]' (a legacy row) or the versioned envelope.
+        if load_figure_set(mistake.figures_json):
+            continue
+        boxes = [
+            box
+            for box in (
+                FigureBox.from_dict(raw)
+                for raw in (load_figure_set(region.figures_json) or [])
+            )
+            if box
+        ]
+        if not boxes:
+            continue
+        try:
+            page_data = storage.read(page.storage_key)
+        except StorageError:
+            logger.warning("backfill: page %s image unavailable", page.id)
+            continue
+        items = store_figures(
+            storage,
+            page_data=page_data,
+            page_width=page.width,
+            page_height=page.height,
+            boxes=boxes,
+            user_id=mistake.user_id,
+            question_id=int(mistake.question_id or 0),
+        )
+        if not items:
+            continue
+        mistake.figures_json = dump_figure_set(items)
+        totals["mistakes"] += 1
+        totals["figures"] += len(items)
+
+    if totals["mistakes"]:
+        db.commit()
+        logger.info(
+            "backfilled figures onto %s mistake(s) | figures=%s",
+            totals["mistakes"],
+            totals["figures"],
+        )
+    return totals
+
+
 def figures_need_repair(db: Session) -> bool:
     """True when at least one mistake still prints as a screenshot of the question.
 
@@ -285,6 +359,7 @@ def paper_needs_repair(db: Session, paper_id: int) -> bool:
 
 
 __all__ = [
+    "backfill_missing_figures",
     "figures_need_repair",
     "paper_needs_repair",
     "repair_legacy_records",

@@ -428,6 +428,71 @@ check("bulk repair leaves the unreadable row alone", bulk["mistakes"] == 0, bulk
 
 check("figure set version stays at 2", FIGURE_SET_VERSION == 2)
 
+
+# --- 12. a record made before figures were extracted gains them -------------
+# A build between "screenshot" and "text + drawings" stored the text but no
+# drawings *and* no screenshot either, so the legacy repair query never saw it.
+# Such a record printed as text with its diagram missing.
+with SessionLocal() as db:
+    db.query(Mistake).delete()
+    db.commit()
+    # Choose in Python: an empty figure set is written as either '[]' or the
+    # versioned envelope, so comparing the raw JSON in SQL picks the wrong row.
+    from app.services.figures import dump_figure_set as _dump
+    from app.services.figures import load_figure_set as _load
+
+    candidates = db.query(QuestionRegion).filter(QuestionRegion.paper_id == paper_id).all()
+    region = next((r for r in candidates if _load(r.figures_json)), None)
+    if region is None:
+        region = candidates[0]
+        region.figures_json = _dump(
+            [{"x": region.x + 5, "y": region.y + 5, "width": 120, "height": 90}]
+        )
+        db.commit()
+
+    record = Mistake(
+        user_id=user_id,
+        paper_id=paper_id,
+        question_id=region.question_id,
+        region_id=region.id,
+        figures_json="[]",
+        question_image_key="",
+        status="active",
+    )
+    db.add(record)
+    db.commit()
+    record_id = record.id
+
+with SessionLocal() as db:
+    from app.services.figurerepair import backfill_missing_figures
+
+    # An earlier test points its paper at a page image that does not exist, so this
+    # check restores a readable page: the backfill must be exercised against a real
+    # picture, not against a broken fixture.
+    page_row = (
+        db.query(PaperPage)
+        .join(Paper, Paper.id == PaperPage.paper_id)
+        .filter(PaperPage.paper_id == paper_id)
+        .order_by(PaperPage.page_no)
+        .first()
+    )
+    page_row.storage_key = "papers/1/1/p1-test.png"
+    db.commit()
+
+    stored = db.get(Mistake, record_id)
+    check("the record starts without drawings", stored.figures_json == "[]", stored.figures_json)
+
+    result = backfill_missing_figures(db, storage=storage, engine=engine_svc)
+    print("backfill result:", result)
+    check("backfill records the mistake it fixed", result["mistakes"] >= 1, result)
+    check("backfill stored at least one drawing", result["figures"] >= 1, result)
+
+    after = db.get(Mistake, record_id)
+    check("the record now has drawings", after.figures_json != "[]", after.figures_json)
+
+    second = backfill_missing_figures(db, storage=storage, engine=engine_svc)
+    check("backfill is idempotent", second["mistakes"] == 0, second)
+
 print()
 if failures:
     print(f"{len(failures)} REPAIR CHECK(S) FAILED: {failures}")

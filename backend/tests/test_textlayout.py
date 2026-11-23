@@ -117,6 +117,56 @@ text = build_question_text([q1a, q2a], QUESTION_START_RE)
 check("two questions split into blocks", len(text.splitlines()) == 2, repr(text))
 check("question 2 text intact", "氩氨刀" in text, text)
 
+# --- 8. a stacked fraction is rebuilt instead of split across lines -------
+# Geometry copied from the real paper: '12m' at y=869-892, 'n' at y=905-919.
+q8 = Box(522, 743, 929, 769, "8.已知某种碳原子的实际质量为mg")
+num = Box(580, 869, 619, 892, "12m")
+den = Box(593, 905, 607, 919, "n")
+
+text = build_question_text([q8, num, den], QUESTION_START_RE)
+check("stacked fraction rebuilt", "12m/n" in text, text)
+check("fraction parts not left dangling", "\nn\n" not in text, repr(text))
+
+# --- 8b. two lines of prose are never merged into a fraction --------------
+prose_upper = Box(522, 743, 929, 769, "8.已知某种碳原子的实际质量为mg，其相对")
+prose_lower = Box(551, 775, 929, 800, "原子质量为12（以这种碳原子的质量为标")
+
+text = build_question_text([prose_upper, prose_lower], QUESTION_START_RE)
+check("prose lines not merged as a fraction", "/" not in text, text)
+check("prose upper kept verbatim", "其相对" in text, text)
+check("prose lower kept verbatim", "为标" in text, text)
+check("prose not duplicated", text.count("已知某种碳原子的实际质量") == 1, text)
+
+# --- 8c. a superscript glyph is raised onto its base ----------------------
+base = Box(100, 200, 130, 224, "m")
+script = Box(131, 194, 143, 208, "2")
+
+text = build_question_text([base, script], QUESTION_START_RE)
+check("superscript raised", "m²" in text, text)
+
+# --- 8d. options laid out side by side keep their own formula -------------
+opt_a = Box(554, 886, 572, 902, "A.")
+frac_a = Box(580, 869, 619, 892, "12m")
+den_a = Box(593, 905, 607, 919, "n")
+opt_b = Box(659, 884, 681, 907, "B")
+frac_b = Box(694, 869, 730, 896, "12n")
+den_b = Box(701, 899, 724, 922, "m")
+noise = Box(723, 894, 740, 914, "H")
+
+text = build_question_text([opt_a, frac_a, den_a, opt_b, frac_b, den_b, noise], QUESTION_START_RE)
+check("option A keeps its own fraction", "A.12m/n" in text, text)
+check("option B keeps its own fraction", "B 12n/m" in text, text)
+check("stray glyph dropped from the stack", "mH" not in text, text)
+check("options stay on one line", text.count("\n") == 0, repr(text))
+
+# --- 8e. prose ending in a CJK glyph never gains a fake superscript -------
+prose = Box(517, 1000, 933, 1029, "5.下列关于原子、分子、离子的说法正确的是")
+bracket = Box(900, 1016, 918, 1030, "（C")
+
+text = build_question_text([prose, bracket], QUESTION_START_RE)
+check("no fake superscript on prose", "⁽" not in text, text)
+check("prose kept verbatim", "说法正确的是" in text, text)
+
 print()
 if failures:
     print(f"{len(failures)} LAYOUT CHECK(S) FAILED: {failures}")
