@@ -384,19 +384,38 @@ def strip_figure_labels(
     # Single characters are never stripped: one-pixel noise inside a diagram is
     # OCR'd as a stray character, and deleting every "上" in the question to get
     # rid of it costs far more than it saves.
+    # A label must stand alone, but "alone" cannot mean "surrounded by spaces":
+    # the layout engine joins adjacent boxes and writes the table/column gaps it
+    # found as '|' and '/', so a label ends up as '蘸有少量/的棉签'. Requiring
+    # whitespace on both sides let exactly that case through, and the label then
+    # printed twice - once in the body, once inside the picture.
+    boundary_before = r"(?:(?<=^)|(?<=[ \t|/]))"
+    boundary_after = r"(?=$|[ \t|/])"
     patterns = [
-        re.compile(r"(?<!\S)" + re.escape(fragment) + r"(?!\S)")
+        re.compile(boundary_before + re.escape(fragment) + boundary_after)
         for fragment in {_collapse(fragment) for fragment in removals}
         if len(fragment.strip()) > 1
     ]
     if not patterns:
         return text
 
+    labels = sorted(
+        {_collapse(fragment) for fragment in removals},
+        key=len,
+        reverse=True,
+    )
+
     cleaned_rows: list[str] = []
     for row in text.splitlines():
         original = row
         for pattern in patterns:
             row = pattern.sub("", row)
+        # OCR often runs two labels together with no separator at all
+        # ('的棉签酚酞溶液'), so no single label matches that chunk any more. A chunk
+        # is dropped when it can be segmented entirely into labels, which covers the
+        # merged case while leaving real text ('B.棉签上酚酞溶液变红') untouched.
+        if labels:
+            row = _strip_label_chunks(row, labels)
         if row != original:
             row = _trim_dangling_columns(row)
             row = _collapse(row)
@@ -407,12 +426,38 @@ def strip_figure_labels(
     return cleaned if cleaned.strip() else text
 
 
+_LABEL_SEPARATOR = re.compile(r"[ \t|/]+")
+
+
+def _strip_label_chunks(row: str, labels: Sequence[str]) -> str:
+    """Drop separator-delimited chunks that consist only of picture labels."""
+    pieces = _LABEL_SEPARATOR.split(row)
+    kept = [piece for piece in pieces if piece and not _covered_by_labels(piece, labels)]
+    if len(kept) == len(pieces):
+        return row
+    return " ".join(kept)
+
+
+def _covered_by_labels(chunk: str, labels: Sequence[str]) -> bool:
+    """True when ``chunk`` can be split entirely into one or more labels."""
+    position = 0
+    while position < len(chunk):
+        for label in labels:
+            if chunk.startswith(label, position):
+                position += len(label)
+                break
+        else:
+            return False
+    return position > 0
+
+
 def _trim_dangling_columns(row: str) -> str:
     """Drop column separators that no longer have a cell on both sides."""
     if "|" not in row:
         return row
     cells = [cell.strip() for cell in row.split("|")]
-    kept = [cell for cell in cells if cell]
+    # A cell that only holds separators is the hole a removed label left behind.
+    kept = [cell for cell in cells if cell.strip(" \t|/")]
     if len(kept) <= 1:
         # Both sides were labels inside the picture: the row is now one cell, or
         # nothing at all - and an empty result is dropped by the caller.

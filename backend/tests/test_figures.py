@@ -138,6 +138,24 @@ check("label is not removed from a longer word", "探究浓氨水性质" in mixe
 check("label is not removed from an answer", "A.瓶中浓氨水变蓝" in mixed, mixed)
 check("standalone label line is removed", "\n浓氨水" not in mixed, mixed)
 
+# --- 4c. a label joined to its neighbour by a column separator -----------
+# The layout engine writes the gap it found as '|' or '/', so two labels printed
+# over one another arrive as '蘸有少量/的棉签'. Requiring spaces on both sides let
+# exactly that case through, and the label printed twice: once in the body, once
+# inside the picture.
+joined = strip_figure_labels(
+    "有关分析或现象描述正确\n蘸有少量/的棉签\n该实验说明",
+    [Line(120, 140, 180, 160, "蘸有少量"), Line(150, 165, 200, 185, "的棉签")],
+    [box],
+)
+check(
+    "a label joined by a separator is removed",
+    "蘸有少量" not in joined and "的棉签" not in joined,
+    joined,
+)
+check("surrounding body text survives the separator case", "该实验说明" in joined, joined)
+check("the line before the labels survives", "有关分析" in joined, joined)
+
 # --- 5. long lines are never treated as picture labels -------------------
 long_line = [Line(110, 110, 210, 130, "这是一整行非常长的题干文字不应该被删除掉啊")]
 check(
